@@ -2,9 +2,21 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Map a Cargo target triple to a zig target triple.
+fn cargo_target_to_zig(target: &str) -> Option<&'static str> {
+    match target {
+        "x86_64-unknown-linux-musl" => Some("x86_64-linux-musl"),
+        "x86_64-unknown-linux-gnu" => Some("x86_64-linux-gnu"),
+        "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
+        "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu"),
+        _ => None,
+    }
+}
+
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let target_triple = env::var("TARGET").unwrap();
     let root = Path::new(&manifest_dir);
 
     let cpp_src = root.join("_cpp_src/src");
@@ -50,26 +62,21 @@ fn main() {
     std::fs::create_dir_all(&obj_dir).unwrap();
 
     // Determine the C++ compiler: prefer zig c++, fallback to c++
-    let compiler = if Command::new("zig").arg("c++").arg("--version").output().is_ok() {
-        "zig-cxx"
-    } else {
-        "cxx"
-    };
+    let use_zig = Command::new("zig").arg("c++").arg("--version").output().is_ok();
+    let zig_target = cargo_target_to_zig(&target_triple);
+
+    // When cross-compiling to a known zig target, we must use zig
+    let use_zig = use_zig || zig_target.is_some();
 
     let mut objects = Vec::new();
 
     for src in &cpp_sources {
-        let obj_name = src
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
+        let obj_name = src.file_stem().unwrap().to_str().unwrap().to_string();
         // Make unique names to avoid conflicts between files with the same base name
         let parent = src.parent().unwrap().file_name().unwrap().to_str().unwrap();
         let obj_file = obj_dir.join(format!("{parent}_{obj_name}.o"));
 
-        let mut cmd = if compiler == "zig-cxx" {
+        let mut cmd = if use_zig {
             let mut c = Command::new("zig");
             c.arg("c++");
             c
@@ -83,10 +90,14 @@ fn main() {
             .arg("-Wall")
             .arg(format!("-I{}", cpp_src.display()))
             .arg(format!("-I{}", json_include.display()))
-            .arg(format!("-I{}", bridge_dir.display()))
-            .arg(src)
-            .arg("-o")
-            .arg(&obj_file);
+            .arg(format!("-I{}", bridge_dir.display()));
+
+        // Pass cross-compilation target if needed
+        if let Some(zt) = zig_target {
+            cmd.arg("-target").arg(zt);
+        }
+
+        cmd.arg(src).arg("-o").arg(&obj_file);
 
         let status = cmd.status().unwrap_or_else(|e| {
             panic!("Failed to compile {}: {}", src.display(), e);
@@ -98,9 +109,15 @@ fn main() {
         objects.push(obj_file);
     }
 
-    // Create static library
+    // Create static library: use zig ar when cross-compiling
     let lib_path = out_dir.join("libdeck_recommend.a");
-    let mut ar_cmd = Command::new("ar");
+    let mut ar_cmd = if zig_target.is_some() {
+        let mut c = Command::new("zig");
+        c.arg("ar");
+        c
+    } else {
+        Command::new("ar")
+    };
     ar_cmd.arg("rcs").arg(&lib_path);
     for obj in &objects {
         ar_cmd.arg(obj);
@@ -112,7 +129,14 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=deck_recommend");
-    println!("cargo:rustc-link-lib=c++");
+
+    // Link C++ standard library (static for musl targets)
+    if target_triple.contains("musl") {
+        println!("cargo:rustc-link-lib=static=c++");
+        println!("cargo:rustc-link-lib=static=c++abi");
+    } else {
+        println!("cargo:rustc-link-lib=c++");
+    }
 
     // Re-run if C++ sources change
     println!("cargo:rerun-if-changed=cpp_bridge/");

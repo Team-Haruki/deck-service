@@ -1,0 +1,74 @@
+name: Build Docker Image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [ -z "$TAG" ]; then
+            TAG="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
+          fi
+          CRATE_VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "crate_version=$CRATE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp Cargo version from tag
+        env:
+          CRATE_VERSION: ${{ steps.version.outputs.crate_version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          version = os.environ["CRATE_VERSION"]
+          updated, count = re.subn(
+              r'(?m)^version = ".*"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update Cargo.toml version")
+          path.write_text(updated)
+          PY
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')
+          VERSION=${{ steps.version.outputs.tag }}
+          docker build \
+            --build-arg VERSION="$VERSION" \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest .
+
+      - name: Push Docker image
+        run: |
+          IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')
+          VERSION=${{ steps.version.outputs.tag }}
+          docker push $IMAGE_NAME:$VERSION
+          docker push $IMAGE_NAME:latest

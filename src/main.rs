@@ -8,9 +8,9 @@ mod state;
 use std::env;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
-use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -21,7 +21,9 @@ use state::AppState;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("deck_service=info".parse().unwrap()))
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("deck_service=info".parse().unwrap()),
+        )
         .init();
 
     // Initialize static data path (defaults to _cpp_src/data relative to the executable)

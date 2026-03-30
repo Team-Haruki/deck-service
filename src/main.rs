@@ -8,6 +8,7 @@ mod state;
 use std::env;
 use std::sync::{Arc, Mutex};
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -51,6 +52,7 @@ async fn main() {
             "/update/musicmetas/string",
             post(handlers::update_musicmetas_from_string),
         )
+        .layer(DefaultBodyLimit::max(1000 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

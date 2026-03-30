@@ -38,6 +38,9 @@ jobs:
           git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
           cd _cpp_src && git submodule update --init --recursive
 
+      - name: Install C++ compiler
+        run: sudo apt-get update && sudo apt-get install -y g++
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 

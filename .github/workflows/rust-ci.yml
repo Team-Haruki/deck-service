@@ -24,6 +24,10 @@ on:
 
 env:
   ZIG_VERSION: "0.15.2"
+
+jobs:
+  build:
+    name: Build & Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

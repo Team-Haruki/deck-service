@@ -62,9 +62,12 @@ fn main() {
     std::fs::create_dir_all(&obj_dir).unwrap();
 
     // Only use zig c++ when cross-compiling to a known zig target.
-    // For native builds, use the host c++ to avoid libc++ vs libstdc++ mismatch on Linux.
+    // For native builds, use the host compiler:
+    //   - Linux: explicitly g++ to guarantee libstdc++ ABI (avoids zig/clang libc++ mismatch)
+    //   - macOS/other: c++ (clang++ with libc++)
     let zig_target = cargo_target_to_zig(&target_triple);
     let use_zig = zig_target.is_some();
+    let native_cxx = if target_triple.contains("linux") { "g++" } else { "c++" };
 
     let mut objects = Vec::new();
 
@@ -79,7 +82,7 @@ fn main() {
             c.arg("c++");
             c
         } else {
-            Command::new("c++")
+            Command::new(native_cxx)
         };
 
         cmd.arg("-c")

@@ -13,6 +13,14 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Cloned C++ source (fetched at build time)
+_cpp_src/
+
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

@@ -239,4 +239,5 @@ LGPL-2.1 — see [LICENSE](LICENSE).
 ## Credits
 
 - [xfl03/sekai-calculator](https://github.com/xfl03/sekai-calculator) — original algorithms and implementation
-- [moe-sekai/sekai-deck-recommend-cpp](https://github.com/moe-sekai/sekai-deck-recommend-cpp) — C++ engine
+- [NeuraXmy/sekai-deck-recommend-cpp](https://github.com/NeuraXmy/sekai-deck-recommend-cpp) — C++ engine original implementation
+- [moe-sekai/sekai-deck-recommend-cpp](https://github.com/moe-sekai/sekai-deck-recommend-cpp) — current C++ engine maintaining

@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
 
 env:
-  ZIG_VERSION: "0.15.2"
+  ZIG_VERSION: "0.14.1"
 
 jobs:
   build:
@@ -38,9 +38,6 @@ jobs:
           git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
           cd _cpp_src && git submodule update --init --recursive
 
-      - name: Install C++ compiler
-        run: sudo apt-get update && sudo apt-get install -y g++
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -48,7 +45,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          prefix-key: "v2"
+          prefix-key: "v3"
 
       - name: Build
         run: cargo build
@@ -74,9 +71,9 @@ jobs:
 
       - name: Install Zig
         run: |
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | \
             sudo tar -xJ -C /usr/local
-          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+          sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -90,7 +87,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          prefix-key: "v2"
+          prefix-key: "v3"
 
       - name: Build static binary
         run: cargo zigbuild --release --target x86_64-unknown-linux-musl

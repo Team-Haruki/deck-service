@@ -27,39 +27,39 @@ pub async fn recommend(
 pub async fn update_masterdata(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMasterdataRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<sonic_rs::Value>, AppError> {
     let engine = state.engine.lock().map_err(|e| AppError::Engine(e.to_string()))?;
     tokio::task::block_in_place(|| engine.update_masterdata(&req.base_dir, &req.region))
         .map_err(AppError::Engine)?;
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    Ok(Json(sonic_rs::json!({ "status": "ok" })))
 }
 
 pub async fn update_masterdata_from_json(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMasterdataFromJsonRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<sonic_rs::Value>, AppError> {
     let engine = state.engine.lock().map_err(|e| AppError::Engine(e.to_string()))?;
     tokio::task::block_in_place(|| engine.update_masterdata_from_json(&req.data, &req.region))
         .map_err(AppError::Engine)?;
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    Ok(Json(sonic_rs::json!({ "status": "ok" })))
 }
 
 pub async fn update_musicmetas(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMusicmetasRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<sonic_rs::Value>, AppError> {
     let engine = state.engine.lock().map_err(|e| AppError::Engine(e.to_string()))?;
     tokio::task::block_in_place(|| engine.update_musicmetas(&req.file_path, &req.region))
         .map_err(AppError::Engine)?;
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    Ok(Json(sonic_rs::json!({ "status": "ok" })))
 }
 
 pub async fn update_musicmetas_from_string(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMusicmetasFromStringRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<sonic_rs::Value>, AppError> {
     let engine = state.engine.lock().map_err(|e| AppError::Engine(e.to_string()))?;
     tokio::task::block_in_place(|| engine.update_musicmetas_from_string(&req.data, &req.region))
         .map_err(AppError::Engine)?;
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    Ok(Json(sonic_rs::json!({ "status": "ok" })))
 }

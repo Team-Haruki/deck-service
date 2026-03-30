@@ -40,7 +40,7 @@ impl DeckRecommend {
         data: &HashMap<String, String>,
         region: &str,
     ) -> Result<(), String> {
-        let json_str = serde_json::to_string(data).map_err(|e| e.to_string())?;
+        let json_str = sonic_rs::to_string(data).map_err(|e| e.to_string())?;
         let c_json = ffi::to_cstring(&json_str);
         let c_region = ffi::to_cstring(region);
         let err = unsafe {
@@ -107,9 +107,9 @@ impl DeckRecommend {
         &self,
         options: &crate::models::DeckRecommendOptions,
     ) -> Result<crate::models::DeckRecommendResult, String> {
-        let json_str = serde_json::to_string(options).map_err(|e| e.to_string())?;
+        let json_str = sonic_rs::to_string(options).map_err(|e| e.to_string())?;
         let result_str = self.recommend_raw(&json_str)?;
-        serde_json::from_str(&result_str).map_err(|e| e.to_string())
+        sonic_rs::from_str(&result_str).map_err(|e| e.to_string())
     }
 }
 

@@ -1,6 +1,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
+use sonic_rs::json;
 
 #[derive(Debug)]
 pub enum AppError {

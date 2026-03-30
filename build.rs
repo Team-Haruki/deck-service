@@ -61,12 +61,10 @@ fn main() {
     let obj_dir = out_dir.join("cpp_obj");
     std::fs::create_dir_all(&obj_dir).unwrap();
 
-    // Determine the C++ compiler: prefer zig c++, fallback to c++
-    let use_zig = Command::new("zig").arg("c++").arg("--version").output().is_ok();
+    // Only use zig c++ when cross-compiling to a known zig target.
+    // For native builds, use the host c++ to avoid libc++ vs libstdc++ mismatch on Linux.
     let zig_target = cargo_target_to_zig(&target_triple);
-
-    // When cross-compiling to a known zig target, we must use zig
-    let use_zig = use_zig || zig_target.is_some();
+    let use_zig = zig_target.is_some();
 
     let mut objects = Vec::new();
 
@@ -130,11 +128,16 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=deck_recommend");
 
-    // Link C++ standard library (static for musl targets)
+    // Link C++ standard library
     if target_triple.contains("musl") {
+        // musl cross-compile via zig: static libc++ + libc++abi
         println!("cargo:rustc-link-lib=static=c++");
         println!("cargo:rustc-link-lib=static=c++abi");
+    } else if target_triple.contains("linux") {
+        // native Linux (gnu): system has libstdc++ from GCC
+        println!("cargo:rustc-link-lib=stdc++");
     } else {
+        // macOS and others: clang's libc++
         println!("cargo:rustc-link-lib=c++");
     }
 

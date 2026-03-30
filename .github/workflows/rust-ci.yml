@@ -23,11 +23,7 @@ on:
   workflow_dispatch:
 
 env:
-  ZIG_VERSION: "0.14.1"
-
-jobs:
-  build:
-    name: Build & Check
+  ZIG_VERSION: "0.15.2"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -71,9 +67,9 @@ jobs:
 
       - name: Install Zig
         run: |
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | \
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
             sudo tar -xJ -C /usr/local
-          sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
+          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

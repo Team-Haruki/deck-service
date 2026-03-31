@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            name: linux-amd64
+          - target: aarch64-unknown-linux-musl
+            name: linux-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Clone C++ engine source
+        run: |
+          git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+          cd _cpp_src && git submodule update --init --recursive
+
+      - name: Install Zig
+        run: |
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
+            sudo tar -xJ -C /usr/local
+          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          if [ -z "$TAG" ] || [ "$TAG" = "refs/tags/" ]; then
+            TAG="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
+          fi
+          CRATE_VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "crate_version=$CRATE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Stamp Cargo version from tag
+        env:
+          CRATE_VERSION: ${{ steps.version.outputs.crate_version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          version = os.environ["CRATE_VERSION"]
+          updated, count = re.subn(
+              r'(?m)^version = ".*"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update Cargo.toml version")
+          path.write_text(updated)
+          PY
+
+      - name: Build static binary
+        run: |
+          cargo zigbuild --release --target ${{ matrix.target }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/deck-service dist/deck-service
+          strip dist/deck-service || true
+          cd dist && tar -czf "deck-service-${{ matrix.name }}.tar.gz" deck-service
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/deck-service-${{ matrix.name }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Create or update Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          TITLE="Release ${TAG}"
+          REPO="${GITHUB_REPOSITORY}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
+          fi
+
+      - name: Upload Release Assets (overwrite)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          gh release upload "$TAG" artifacts/**/* --repo "$REPO" --clobber

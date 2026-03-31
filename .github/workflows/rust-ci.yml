@@ -1,0 +1,98 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "src/**"
+      - "cpp_bridge/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "src/**"
+      - "cpp_bridge/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  build:
+    name: Build & Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Clone C++ engine source
+        run: |
+          git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+          cd _cpp_src && git submodule update --init --recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          prefix-key: "v3"
+
+      - name: Build
+        run: cargo build
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  cross-compile:
+    name: Cross-compile (Linux x86_64 musl)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Clone C++ engine source
+        run: |
+          git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+          cd _cpp_src && git submodule update --init --recursive
+
+      - name: Install Zig
+        run: |
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
+            sudo tar -xJ -C /usr/local
+          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          prefix-key: "v3"
+
+      - name: Build static binary
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl
+
+      - name: Verify binary
+        run: |
+          file target/x86_64-unknown-linux-musl/release/deck-service
+          file target/x86_64-unknown-linux-musl/release/deck-service | grep -q "statically linked"

@@ -5,15 +5,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ZIG_VERSION=0.14.1
+ARG ZIG_VERSION=0.15.2
 RUN case "$(uname -m)" in \
       x86_64)  ZIG_ARCH=x86_64 ;; \
       aarch64) ZIG_ARCH=aarch64 ;; \
       *) echo "Unsupported arch: $(uname -m)" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" | \
     tar -xJ -C /usr/local && \
-    ln -s /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
+    ln -s /usr/local/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
 
 RUN cargo install cargo-zigbuild && \
     rustup target add x86_64-unknown-linux-musl

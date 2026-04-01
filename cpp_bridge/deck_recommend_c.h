@@ -35,6 +35,10 @@ const char* deck_recommend_update_musicmetas(DeckRecommendHandle handle, const c
 // Returns NULL on success, or an error message (caller must free)
 const char* deck_recommend_update_musicmetas_from_string(DeckRecommendHandle handle, const char* json_str, const char* region);
 
+// Parse and cache user data by hash for later recommend calls.
+// On success, *hash_out is set to the returned userdata hash (caller must free).
+const char* deck_recommend_cache_userdata(DeckRecommendHandle handle, const char* userdata_json, const char** hash_out);
+
 // Run deck recommendation. options_json is the full options as a JSON string.
 // Returns a JSON string with the result (caller must free), or NULL on failure.
 // If error occurs, *error_out is set to an error message (caller must free).

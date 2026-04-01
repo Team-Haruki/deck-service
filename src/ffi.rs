@@ -27,6 +27,11 @@ unsafe extern "C" {
         json_str: *const c_char,
         region: *const c_char,
     ) -> *const c_char;
+    pub fn deck_recommend_cache_userdata(
+        handle: DeckRecommendHandle,
+        userdata_json: *const c_char,
+        hash_out: *mut *const c_char,
+    ) -> *const c_char;
     pub fn deck_recommend_recommend(
         handle: DeckRecommendHandle,
         options_json: *const c_char,

@@ -43,6 +43,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/cache_userdata", post(handlers::cache_userdata))
         .route("/recommend", post(handlers::recommend))
         .route("/update/masterdata", post(handlers::update_masterdata))
         .route(

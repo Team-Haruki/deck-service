@@ -14,12 +14,16 @@
 #include "deck-recommend/deck-result-update.h"
 
 #include <nlohmann/json.hpp>
-#include <string>
-#include <map>
-#include <set>
-#include <memory>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <deque>
+#include <map>
+#include <memory>
+#include <set>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 
 using json = nlohmann::json;
 
@@ -35,6 +39,18 @@ static char* alloc_cstr(const std::string& s) {
 
 static char* alloc_error(const std::string& msg) {
     return alloc_cstr(msg);
+}
+
+static std::string hash_userdata_payload(const std::string& payload) {
+    uint64_t hash = 14695981039346656037ull;
+    for (unsigned char ch : payload) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ull;
+    }
+
+    char buffer[17];
+    std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(buffer);
 }
 
 // ---- region map ----
@@ -61,6 +77,56 @@ static const std::set<std::string> VALID_SKILL_ORDER_STRATEGIES = {"average","ma
 class SekaiDeckRecommendC {
     std::map<Region, std::shared_ptr<MasterData>> region_masterdata;
     std::map<Region, std::shared_ptr<MusicMetas>> region_musicmetas;
+    std::unordered_map<std::string, std::shared_ptr<UserData>> userdata_cache;
+    std::deque<std::string> userdata_cache_order;
+
+    static constexpr std::size_t max_userdata_cache_entries = 64;
+
+    void remember_userdata(
+        const std::string& userdata_hash,
+        const std::shared_ptr<UserData>& userdata
+    ) {
+        if (!userdata_cache.count(userdata_hash)) {
+            userdata_cache_order.push_back(userdata_hash);
+        }
+        userdata_cache[userdata_hash] = userdata;
+
+        while (userdata_cache_order.size() > max_userdata_cache_entries) {
+            auto oldest = userdata_cache_order.front();
+            userdata_cache_order.pop_front();
+            userdata_cache.erase(oldest);
+        }
+    }
+
+    std::shared_ptr<UserData> resolve_userdata(const json& opts) {
+        if (opts.contains("userdata_hash") && !opts["userdata_hash"].is_null()) {
+            if (!opts["userdata_hash"].is_string())
+                throw std::invalid_argument("userdata_hash must be a string.");
+
+            std::string userdata_hash = opts["userdata_hash"];
+            auto it = userdata_cache.find(userdata_hash);
+            if (it == userdata_cache.end())
+                throw std::invalid_argument("User data not found for userdata_hash: " + userdata_hash);
+            return it->second;
+        }
+
+        auto userdata = std::make_shared<UserData>();
+        if (opts.contains("user_data_file_path") && opts["user_data_file_path"].is_string()) {
+            userdata->loadFromFile(opts["user_data_file_path"].get<std::string>());
+            return userdata;
+        }
+
+        if (opts.contains("user_data_str") && opts["user_data_str"].is_string()) {
+            auto userdata_str = opts["user_data_str"].get<std::string>();
+            userdata->loadFromString(userdata_str);
+            remember_userdata(hash_userdata_payload(userdata_str), userdata);
+            return userdata;
+        }
+
+        throw std::invalid_argument(
+            "Either userdata_hash, user_data_file_path or user_data_str is required."
+        );
+    }
 
 public:
     void update_masterdata(const std::string& base_dir, const std::string& region_str) {
@@ -95,6 +161,14 @@ public:
         region_musicmetas[r]->loadFromString(s);
     }
 
+    std::string cache_userdata(const std::string& userdata_str) {
+        auto userdata = std::make_shared<UserData>();
+        userdata->loadFromString(userdata_str);
+        auto userdata_hash = hash_userdata_payload(userdata_str);
+        remember_userdata(userdata_hash, userdata);
+        return userdata_hash;
+    }
+
     json recommend(const json& opts) {
         // --- region ---
         if (!opts.contains("region") || !opts["region"].is_string())
@@ -105,14 +179,7 @@ public:
         Region region = REGION_MAP.at(region_str);
 
         // --- user data ---
-        auto userdata = std::make_shared<UserData>();
-        if (opts.contains("user_data_file_path") && opts["user_data_file_path"].is_string()) {
-            userdata->loadFromFile(opts["user_data_file_path"].get<std::string>());
-        } else if (opts.contains("user_data_str") && opts["user_data_str"].is_string()) {
-            userdata->loadFromString(opts["user_data_str"].get<std::string>());
-        } else {
-            throw std::invalid_argument("Either user_data_file_path or user_data_str is required.");
-        }
+        auto userdata = resolve_userdata(opts);
 
         // --- master data & music metas ---
         if (!region_masterdata.count(region))
@@ -513,6 +580,18 @@ const char* deck_recommend_update_musicmetas(DeckRecommendHandle handle, const c
 const char* deck_recommend_update_musicmetas_from_string(DeckRecommendHandle handle, const char* json_str, const char* region) {
     try {
         static_cast<SekaiDeckRecommendC*>(handle)->update_musicmetas_string(json_str, region);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return alloc_error(e.what());
+    }
+}
+
+const char* deck_recommend_cache_userdata(DeckRecommendHandle handle, const char* userdata_json, const char** hash_out) {
+    try {
+        auto userdata_hash = static_cast<SekaiDeckRecommendC*>(handle)->cache_userdata(userdata_json);
+        if (hash_out) {
+            *hash_out = alloc_cstr(userdata_hash);
+        }
         return nullptr;
     } catch (const std::exception& e) {
         return alloc_error(e.what());

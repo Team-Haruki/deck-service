@@ -1,14 +1,47 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn has_cpp_layout(path: &Path) -> bool {
+    path.join("src").is_dir() && path.join("3rdparty").is_dir()
+}
+
+fn resolve_cpp_root(root: &Path) -> PathBuf {
+    if let Ok(path) = env::var("DECK_CPP_SRC") {
+        let candidate = PathBuf::from(path);
+        if has_cpp_layout(&candidate) {
+            return candidate;
+        }
+    }
+
+    let bundled = root.join("_cpp_src");
+    if has_cpp_layout(&bundled) {
+        return bundled;
+    }
+
+    if let Some(parent) = root.parent() {
+        let sibling = parent.join("sekai-deck-recommend-cpp");
+        if has_cpp_layout(&sibling) {
+            return sibling;
+        }
+    }
+
+    panic!(
+        "Unable to locate sekai-deck-recommend-cpp sources. Checked DECK_CPP_SRC, {} and sibling sekai-deck-recommend-cpp",
+        bundled.display()
+    );
+}
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let target = env::var("TARGET").unwrap();
     let root = Path::new(&manifest_dir);
-
-    let cpp_src = root.join("_cpp_src/src");
-    let json_include = root.join("_cpp_src/3rdparty/json/single_include");
+    let cpp_root = resolve_cpp_root(root);
+    let cpp_src = cpp_root.join("src");
+    let json_include = cpp_root.join("3rdparty/json/single_include");
     let bridge_dir = root.join("cpp_bridge");
+
+    println!("cargo:warning=Using deck engine source at {}", cpp_root.display());
+    println!("cargo:rerun-if-env-changed=DECK_CPP_SRC");
 
     let mut build = cc::Build::new();
     build
@@ -78,5 +111,5 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=cpp_bridge/");
-    println!("cargo:rerun-if-changed=_cpp_src/src/");
+    println!("cargo:rerun-if-changed={}", cpp_src.display());
 }

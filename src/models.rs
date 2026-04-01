@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use sonic_rs::Value;
 
 // ---- Request types ----
 
@@ -86,6 +89,8 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub algorithm: Option<String>,
     pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userdata_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_data_file_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,6 +201,32 @@ pub struct RecommendDeck {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeckRecommendResult {
     pub decks: Vec<RecommendDeck>,
+}
+
+pub type BatchRecommendOption = BTreeMap<String, Value>;
+
+#[derive(Debug, Deserialize)]
+pub struct BatchRecommendRequest {
+    pub region: String,
+    pub batch_options: Vec<BatchRecommendOption>,
+    pub userdata_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheUserdataResponse {
+    pub userdata_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchRecommendResponseItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alg: Option<String>,
+    pub cost_time: f64,
+    pub wait_time: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<DeckRecommendResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---- Admin request types ----

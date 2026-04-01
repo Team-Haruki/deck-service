@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 
+use serde::Serialize;
+
 use crate::ffi;
 
 /// Safe wrapper around the C++ SekaiDeckRecommend instance.
@@ -75,6 +77,24 @@ impl DeckRecommend {
         ffi::check_error(err)
     }
 
+    pub fn cache_userdata(&self, data: &str) -> Result<String, String> {
+        let c_data = ffi::to_cstring(data);
+        let mut hash_out: *const std::os::raw::c_char = std::ptr::null();
+        let err = unsafe {
+            ffi::deck_recommend_cache_userdata(self.handle, c_data.as_ptr(), &mut hash_out)
+        };
+        ffi::check_error(err)?;
+        if hash_out.is_null() {
+            return Err("deck_recommend_cache_userdata returned empty hash".into());
+        }
+
+        let hash = unsafe { CStr::from_ptr(hash_out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { ffi::deck_recommend_free_string(hash_out) };
+        Ok(hash)
+    }
+
     /// Run deck recommendation with a JSON options object.
     /// Returns the raw JSON result string.
     pub fn recommend_raw(&self, options_json: &str) -> Result<String, String> {
@@ -102,14 +122,22 @@ impl DeckRecommend {
         Ok(result)
     }
 
+    /// Run deck recommendation with any serializable payload.
+    pub fn recommend_value<T: Serialize>(
+        &self,
+        options: &T,
+    ) -> Result<crate::models::DeckRecommendResult, String> {
+        let json_str = sonic_rs::to_string(options).map_err(|e| e.to_string())?;
+        let result_str = self.recommend_raw(&json_str)?;
+        sonic_rs::from_str(&result_str).map_err(|e| e.to_string())
+    }
+
     /// Run deck recommendation with typed options.
     pub fn recommend(
         &self,
         options: &crate::models::DeckRecommendOptions,
     ) -> Result<crate::models::DeckRecommendResult, String> {
-        let json_str = sonic_rs::to_string(options).map_err(|e| e.to_string())?;
-        let result_str = self.recommend_raw(&json_str)?;
-        sonic_rs::from_str(&result_str).map_err(|e| e.to_string())
+        self.recommend_value(options)
     }
 }
 

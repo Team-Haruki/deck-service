@@ -63,6 +63,18 @@ export BIND_ADDR=0.0.0.0:3000
 # Optional: log level control
 export RUST_LOG=deck_service=info
 
+# Optional: warn when waiting for the engine lock too long (ms)
+export DECK_LOCK_WARN_MS=1000
+
+# Optional: fail fast if the shared engine lock cannot be acquired in time (ms)
+export DECK_LOCK_TIMEOUT_MS=30000
+
+# Optional: warn when a single engine call runs too long (ms)
+export DECK_ENGINE_WARN_MS=10000
+
+# Optional: inject a default recommend timeout_ms when the request does not provide one
+export DECK_RECOMMEND_TIMEOUT_MS=15000
+
 ./deck-service
 ```
 
@@ -209,6 +221,29 @@ POST /update/musicmetas/string
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
 | `BIND_ADDR` | `0.0.0.0:3000` | HTTP server listen address |
 | `RUST_LOG` | `deck_service=info` | Tracing log filter |
+| `DECK_LOCK_WARN_MS` | `1000` | Warn threshold for waiting on the shared engine mutex |
+| `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring the shared engine mutex |
+| `DECK_ENGINE_WARN_MS` | `10000` | Warn threshold for a single FFI/engine operation |
+| `DECK_RECOMMEND_TIMEOUT_MS` | unset | Default `timeout_ms` injected into recommend requests when missing |
+
+## Debugging Hung Requests
+
+When investigating a suspected deadlock or long stall, start the service with:
+
+```bash
+export RUST_LOG=deck_service=debug
+export DECK_LOCK_WARN_MS=500
+export DECK_LOCK_TIMEOUT_MS=5000
+export DECK_ENGINE_WARN_MS=3000
+export DECK_RECOMMEND_TIMEOUT_MS=8000
+```
+
+This enables per-request `op_id` logs around:
+
+- request admission
+- waiting for the shared engine lock
+- entering/leaving each FFI call
+- per-item progress inside batch recommend
 
 ## Project Structure
 

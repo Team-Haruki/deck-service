@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -23,18 +24,37 @@ impl DeckRecommend {
     }
 
     pub fn init_data_path(path: &str) -> Result<(), String> {
+        let started = Instant::now();
+        tracing::debug!(data_path = %path, "ffi init_data_path start");
         let c_path = ffi::to_cstring(path);
         let err = unsafe { ffi::deck_recommend_init_data_path(c_path.as_ptr()) };
-        ffi::check_error(err)
+        let result = ffi::check_error(err);
+        if result.is_ok() {
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi init_data_path completed"
+            );
+        }
+        result
     }
 
     pub fn update_masterdata(&self, base_dir: &str, region: &str) -> Result<(), String> {
+        let started = Instant::now();
+        tracing::debug!(region = %region, base_dir = %base_dir, "ffi update_masterdata start");
         let c_dir = ffi::to_cstring(base_dir);
         let c_region = ffi::to_cstring(region);
         let err = unsafe {
             ffi::deck_recommend_update_masterdata(self.handle, c_dir.as_ptr(), c_region.as_ptr())
         };
-        ffi::check_error(err)
+        let result = ffi::check_error(err);
+        if result.is_ok() {
+            tracing::debug!(
+                region = %region,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi update_masterdata completed"
+            );
+        }
+        result
     }
 
     pub fn update_masterdata_from_json(
@@ -42,6 +62,12 @@ impl DeckRecommend {
         data: &HashMap<String, String>,
         region: &str,
     ) -> Result<(), String> {
+        let started = Instant::now();
+        tracing::debug!(
+            region = %region,
+            file_count = data.len(),
+            "ffi update_masterdata_from_json start"
+        );
         let json_str = sonic_rs::to_string(data).map_err(|e| e.to_string())?;
         let c_json = ffi::to_cstring(&json_str);
         let c_region = ffi::to_cstring(region);
@@ -52,19 +78,44 @@ impl DeckRecommend {
                 c_region.as_ptr(),
             )
         };
-        ffi::check_error(err)
+        let result = ffi::check_error(err);
+        if result.is_ok() {
+            tracing::debug!(
+                region = %region,
+                json_bytes = json_str.len(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi update_masterdata_from_json completed"
+            );
+        }
+        result
     }
 
     pub fn update_musicmetas(&self, file_path: &str, region: &str) -> Result<(), String> {
+        let started = Instant::now();
+        tracing::debug!(region = %region, file_path = %file_path, "ffi update_musicmetas start");
         let c_path = ffi::to_cstring(file_path);
         let c_region = ffi::to_cstring(region);
         let err = unsafe {
             ffi::deck_recommend_update_musicmetas(self.handle, c_path.as_ptr(), c_region.as_ptr())
         };
-        ffi::check_error(err)
+        let result = ffi::check_error(err);
+        if result.is_ok() {
+            tracing::debug!(
+                region = %region,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi update_musicmetas completed"
+            );
+        }
+        result
     }
 
     pub fn update_musicmetas_from_string(&self, data: &str, region: &str) -> Result<(), String> {
+        let started = Instant::now();
+        tracing::debug!(
+            region = %region,
+            data_bytes = data.len(),
+            "ffi update_musicmetas_from_string start"
+        );
         let c_data = ffi::to_cstring(data);
         let c_region = ffi::to_cstring(region);
         let err = unsafe {
@@ -74,10 +125,20 @@ impl DeckRecommend {
                 c_region.as_ptr(),
             )
         };
-        ffi::check_error(err)
+        let result = ffi::check_error(err);
+        if result.is_ok() {
+            tracing::debug!(
+                region = %region,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi update_musicmetas_from_string completed"
+            );
+        }
+        result
     }
 
     pub fn cache_userdata(&self, data: &str) -> Result<String, String> {
+        let started = Instant::now();
+        tracing::debug!(data_bytes = data.len(), "ffi cache_userdata start");
         let c_data = ffi::to_cstring(data);
         let mut hash_out: *const std::os::raw::c_char = std::ptr::null();
         let err = unsafe {
@@ -92,12 +153,19 @@ impl DeckRecommend {
             .to_string_lossy()
             .into_owned();
         unsafe { ffi::deck_recommend_free_string(hash_out) };
+        tracing::debug!(
+            hash_prefix = %hash.chars().take(8).collect::<String>(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "ffi cache_userdata completed"
+        );
         Ok(hash)
     }
 
     /// Run deck recommendation with a JSON options object.
     /// Returns the raw JSON result string.
     pub fn recommend_raw(&self, options_json: &str) -> Result<String, String> {
+        let started = Instant::now();
+        tracing::debug!(options_bytes = options_json.len(), "ffi recommend start");
         let c_opts = ffi::to_cstring(options_json);
         let mut error_out: *const std::os::raw::c_char = std::ptr::null();
 
@@ -110,6 +178,11 @@ impl DeckRecommend {
                     .to_string_lossy()
                     .into_owned();
                 unsafe { ffi::deck_recommend_free_string(error_out) };
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    error = %msg,
+                    "ffi recommend returned error"
+                );
                 return Err(msg);
             }
             return Err("Unknown error during recommendation".into());
@@ -119,6 +192,11 @@ impl DeckRecommend {
             .to_string_lossy()
             .into_owned();
         unsafe { ffi::deck_recommend_free_string(result_ptr) };
+        tracing::debug!(
+            result_bytes = result.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "ffi recommend completed"
+        );
         Ok(result)
     }
 

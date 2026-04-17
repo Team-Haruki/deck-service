@@ -222,15 +222,23 @@ public:
             auto event_type_enum = mapEnum(EnumMap::eventType, event_type_str);
 
             if (opts.contains("world_bloom_event_turn") && !opts["world_bloom_event_turn"].is_null()) {
-                if (!opts.contains("event_unit") || !opts["event_unit"].is_string())
-                    throw std::invalid_argument("event_unit is required for world bloom fake event.");
-                std::string eu = opts["event_unit"];
-                if (!VALID_UNIT_TYPES.count(eu))
-                    throw std::invalid_argument("Invalid event unit: " + eu);
                 int turn = opts["world_bloom_event_turn"].get<int>();
-                if (turn < 1 || turn > 2)
+                if (turn < 1 || turn > 3)
                     throw std::invalid_argument("Invalid world bloom event turn.");
-                eventId = dp.masterData->getWorldBloomFakeEventId(turn, mapEnum(EnumMap::unit, eu));
+                if (turn == 3) {
+                    if (!opts.contains("world_bloom_character_id") || opts["world_bloom_character_id"].is_null())
+                        throw std::invalid_argument("world_bloom_character_id is required for world bloom 3 fake event.");
+                    int characterId = opts["world_bloom_character_id"].get<int>();
+                    int part = dp.masterData->getWorldBloom3PartByCharacterId(characterId);
+                    eventId = dp.masterData->getWorldBloomFakeEventId(turn, part);
+                } else {
+                    if (!opts.contains("event_unit") || !opts["event_unit"].is_string())
+                        throw std::invalid_argument("event_unit is required for world bloom fake event.");
+                    std::string eu = opts["event_unit"];
+                    if (!VALID_UNIT_TYPES.count(eu))
+                        throw std::invalid_argument("Invalid event unit: " + eu);
+                    eventId = dp.masterData->getWorldBloomFakeEventId(turn, mapEnum(EnumMap::unit, eu));
+                }
             } else if (opts.contains("event_attr") || opts.contains("event_unit")) {
                 if (!opts.contains("event_attr") || !opts.contains("event_unit"))
                     throw std::invalid_argument("event_attr and event_unit must be specified together.");

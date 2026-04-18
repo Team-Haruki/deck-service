@@ -12,13 +12,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
-use parking_lot::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use bridge::DeckRecommend;
-use state::{AppState, DebugConfig};
+use state::{AppState, DebugConfig, EnginePool};
 
 #[tokio::main]
 async fn main() {
@@ -42,10 +41,12 @@ async fn main() {
     let lock_timeout = env_duration_ms("DECK_LOCK_TIMEOUT_MS", 30_000);
     let engine_warn_threshold = env_duration_ms("DECK_ENGINE_WARN_MS", 10_000);
     let default_recommend_timeout_ms = env_optional_i32("DECK_RECOMMEND_TIMEOUT_MS");
+    let engine_pool_size =
+        env_usize_at_least_one("DECK_ENGINE_POOL_SIZE").unwrap_or_else(default_engine_pool_size);
 
-    let engine = DeckRecommend::new().expect("Failed to create DeckRecommend engine");
+    let engines = EnginePool::new(engine_pool_size).expect("Failed to create DeckRecommend pool");
     let state = Arc::new(AppState {
-        engine: Mutex::new(engine),
+        engines,
         next_op_id: std::sync::atomic::AtomicU64::new(0),
         debug: DebugConfig {
             lock_warn_threshold,
@@ -59,6 +60,7 @@ async fn main() {
         lock_warn_ms = lock_warn_threshold.as_millis() as u64,
         lock_timeout_ms = lock_timeout.as_millis() as u64,
         engine_warn_ms = engine_warn_threshold.as_millis() as u64,
+        engine_pool_size = state.engines.size(),
         default_recommend_timeout_ms = default_recommend_timeout_ms.unwrap_or_default(),
         "Initialized deck-service debug thresholds"
     );
@@ -133,4 +135,36 @@ fn env_optional_i32(name: &str) -> Option<i32> {
         },
         Err(_) => None,
     }
+}
+
+fn env_usize_at_least_one(name: &str) -> Option<usize> {
+    match env::var(name) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(value) if value > 0 => Some(value),
+            Ok(_) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %raw,
+                    "Ignoring non-positive engine pool size"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %raw,
+                    error = %err,
+                    "Ignoring invalid engine pool size"
+                );
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
+fn default_engine_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get().min(4))
+        .unwrap_or(1)
 }

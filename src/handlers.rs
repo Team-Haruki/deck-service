@@ -308,7 +308,8 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
                 match engine.recommend_value(&option) {
                     Ok(result) => {
                         let elapsed = started.elapsed();
-                        tracing::debug!(
+                        let support_deck_debug = summarize_support_deck_debug(&result);
+                        tracing::info!(
                             op_id,
                             op = "recommend_batch_item",
                             item_index = index,
@@ -317,6 +318,7 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
                             timeout_ms,
                             elapsed_ms = elapsed_ms(elapsed),
                             deck_count = result.decks.len(),
+                            support_deck = %support_deck_debug,
                             "Batch recommendation item completed"
                         );
                         responses.push(BatchRecommendResponseItem {
@@ -589,4 +591,25 @@ fn elapsed_ms(duration: std::time::Duration) -> f64 {
 
 fn truncate_head(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
+}
+
+fn summarize_support_deck_debug(result: &DeckRecommendResult) -> String {
+    let Some(first) = result.decks.first() else {
+        return "none".into();
+    };
+    let mut out = format!("rate={:.2}", first.support_deck_bonus_rate);
+    match &first.support_deck_cards {
+        Some(cards) if !cards.is_empty() => {
+            let items = cards
+                .iter()
+                .map(|card| format!("{}:{:.2}", card.card_id, card.bonus))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(" cards=[");
+            out.push_str(&items);
+            out.push(']');
+        }
+        _ => out.push_str(" cards=[]"),
+    }
+    out
 }

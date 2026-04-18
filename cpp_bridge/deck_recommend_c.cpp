@@ -499,6 +499,17 @@ public:
             dj["support_deck_bonus_rate"] = deck.supportDeckBonus.value_or(0);
             dj["multi_live_score_up"] = deck.multiLiveScoreUp;
 
+            if (deck.supportDeckCards.has_value()) {
+                json support_cards_json = json::array();
+                for (const auto& supportCard : deck.supportDeckCards.value()) {
+                    json scj;
+                    scj["card_id"] = supportCard.cardId;
+                    scj["bonus"] = supportCard.bonus;
+                    support_cards_json.push_back(scj);
+                }
+                dj["support_deck_cards"] = support_cards_json;
+            }
+
             json cards_json = json::array();
             for (const auto& card : deck.cards) {
                 json cj;

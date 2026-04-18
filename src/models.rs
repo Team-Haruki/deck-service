@@ -181,6 +181,12 @@ pub struct RecommendCard {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RecommendSupportDeckCard {
+    pub card_id: i32,
+    pub bonus: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RecommendDeck {
     pub score: i32,
     pub live_score: i32,
@@ -196,6 +202,8 @@ pub struct RecommendDeck {
     pub support_deck_bonus_rate: f64,
     pub multi_live_score_up: f64,
     pub cards: Vec<RecommendCard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_deck_cards: Option<Vec<RecommendSupportDeckCard>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

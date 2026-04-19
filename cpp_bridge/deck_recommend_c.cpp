@@ -535,7 +535,7 @@ public:
                 for (const auto& supportCard : deck.supportDeckCards.value()) {
                     json scj;
                     scj["card_id"] = supportCard.cardId;
-                    scj["bonus"] = supportCard.bonus;
+                    scj["bonus"] = supportCard.supportDeckBonus.value_or(0);
                     support_cards_json.push_back(scj);
                 }
                 dj["support_deck_cards"] = support_cards_json;

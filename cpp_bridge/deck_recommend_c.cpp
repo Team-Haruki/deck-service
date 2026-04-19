@@ -14,6 +14,7 @@
 #include "deck-recommend/deck-result-update.h"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +27,10 @@
 #include <unordered_map>
 
 using json = nlohmann::json;
+
+namespace {
+constexpr int kMaxRecommendTimeoutMs = 5000;
+}
 
 // ---- helpers ----
 
@@ -53,6 +58,29 @@ static std::string hash_userdata_payload(const std::string& payload) {
     return std::string(buffer);
 }
 
+static bool ends_with_json_suffix(std::string_view value) {
+    if (value.size() < 5) {
+        return false;
+    }
+    auto suffix = value.substr(value.size() - 5);
+    return (suffix[0] == '.')
+        && (suffix[1] == 'j' || suffix[1] == 'J')
+        && (suffix[2] == 's' || suffix[2] == 'S')
+        && (suffix[3] == 'o' || suffix[3] == 'O')
+        && (suffix[4] == 'n' || suffix[4] == 'N');
+}
+
+static std::string normalize_masterdata_key(std::string key) {
+    auto last_sep = key.find_last_of("/\\");
+    if (last_sep != std::string::npos) {
+        key = key.substr(last_sep + 1);
+    }
+    if (ends_with_json_suffix(key)) {
+        key.resize(key.size() - 5);
+    }
+    return key;
+}
+
 // ---- region map ----
 
 static const std::map<std::string, Region> REGION_MAP = {
@@ -63,7 +91,9 @@ static const std::map<std::string, Region> REGION_MAP = {
 // ---- validation sets ----
 
 static const std::set<std::string> VALID_TARGETS = {"score","skill","power","bonus"};
-static const std::set<std::string> VALID_ALGORITHMS = {"sa","dfs","ga"};
+static const std::set<std::string> VALID_ALGORITHMS = {
+    "dfs", "ga", "dfs_ga", "dfs-ga", "rl"
+};
 static const std::set<std::string> VALID_MUSIC_DIFFS = {"easy","normal","hard","expert","master","append"};
 static const std::set<std::string> VALID_LIVE_TYPES = {"multi","solo","challenge","cheerful","auto","mysekai","challenge_auto"};
 static const std::set<std::string> VALID_UNIT_TYPES = {"light_sound","idol","street","theme_park","school_refusal","piapro"};
@@ -133,32 +163,44 @@ public:
         if (!REGION_MAP.count(region_str))
             throw std::invalid_argument("Invalid region: " + region_str);
         auto r = REGION_MAP.at(region_str);
-        region_masterdata[r] = std::make_shared<MasterData>();
-        region_masterdata[r]->loadFromFiles(base_dir);
+        auto next_masterdata = std::make_shared<MasterData>();
+        next_masterdata->loadFromFiles(base_dir);
+        region_masterdata[r] = std::move(next_masterdata);
     }
 
     void update_masterdata_from_strings(std::map<std::string, std::string>& data, const std::string& region_str) {
         if (!REGION_MAP.count(region_str))
             throw std::invalid_argument("Invalid region: " + region_str);
         auto r = REGION_MAP.at(region_str);
-        region_masterdata[r] = std::make_shared<MasterData>();
-        region_masterdata[r]->loadFromStrings(data);
+        std::map<std::string, std::string> normalized_data{};
+        for (const auto& [raw_key, value] : data) {
+            auto normalized_key = normalize_masterdata_key(raw_key);
+            auto existing = normalized_data.find(normalized_key);
+            if (existing == normalized_data.end() || raw_key == normalized_key) {
+                normalized_data[normalized_key] = value;
+            }
+        }
+        auto next_masterdata = std::make_shared<MasterData>();
+        next_masterdata->loadFromStrings(normalized_data);
+        region_masterdata[r] = std::move(next_masterdata);
     }
 
     void update_musicmetas_file(const std::string& file_path, const std::string& region_str) {
         if (!REGION_MAP.count(region_str))
             throw std::invalid_argument("Invalid region: " + region_str);
         auto r = REGION_MAP.at(region_str);
-        region_musicmetas[r] = std::make_shared<MusicMetas>();
-        region_musicmetas[r]->loadFromFile(file_path);
+        auto next_musicmetas = std::make_shared<MusicMetas>();
+        next_musicmetas->loadFromFile(file_path);
+        region_musicmetas[r] = std::move(next_musicmetas);
     }
 
     void update_musicmetas_string(const std::string& s, const std::string& region_str) {
         if (!REGION_MAP.count(region_str))
             throw std::invalid_argument("Invalid region: " + region_str);
         auto r = REGION_MAP.at(region_str);
-        region_musicmetas[r] = std::make_shared<MusicMetas>();
-        region_musicmetas[r]->loadFromString(s);
+        auto next_musicmetas = std::make_shared<MusicMetas>();
+        next_musicmetas->loadFromString(s);
+        region_musicmetas[r] = std::move(next_musicmetas);
     }
 
     std::string cache_userdata(const std::string& userdata_str) {
@@ -300,9 +342,10 @@ public:
         // algorithm
         std::string algorithm = opts.value("algorithm", "ga");
         if (!VALID_ALGORITHMS.count(algorithm)) throw std::invalid_argument("Invalid algorithm: " + algorithm);
-        if (algorithm == "sa") config.algorithm = RecommendAlgorithm::SA;
-        else if (algorithm == "dfs") config.algorithm = RecommendAlgorithm::DFS;
+        if (algorithm == "dfs") config.algorithm = RecommendAlgorithm::DFS;
         else if (algorithm == "ga") config.algorithm = RecommendAlgorithm::GA;
+        else if (algorithm == "dfs_ga" || algorithm == "dfs-ga") config.algorithm = RecommendAlgorithm::DFS_GA;
+        else if (algorithm == "rl") config.algorithm = RecommendAlgorithm::RL;
 
         // filter other unit
         config.filterOtherUnit = opts.value("filter_other_unit", false);
@@ -401,6 +444,7 @@ public:
         if (opts.contains("timeout_ms") && !opts["timeout_ms"].is_null()) {
             config.timeout_ms = opts["timeout_ms"].get<int>();
         }
+        config.timeout_ms = std::clamp(config.timeout_ms, 1, kMaxRecommendTimeoutMs);
 
         // card config helper
         auto apply_card_config = [&](const std::string& key, const json& cfg) {
@@ -438,21 +482,8 @@ public:
             }
         }
 
-        // SA options
-        if (config.algorithm == RecommendAlgorithm::SA && opts.contains("sa_options") && opts["sa_options"].is_object()) {
-            const auto& sa = opts["sa_options"];
-            if (sa.contains("run_num")) config.saRunCount = sa["run_num"].get<int>();
-            if (sa.contains("seed")) config.saSeed = sa["seed"].get<int>();
-            if (sa.contains("max_iter")) config.saMaxIter = sa["max_iter"].get<int>();
-            if (sa.contains("max_no_improve_iter")) config.saMaxIterNoImprove = sa["max_no_improve_iter"].get<int>();
-            if (sa.contains("time_limit_ms")) config.saMaxTimeMs = sa["time_limit_ms"].get<int>();
-            if (sa.contains("start_temprature")) config.saStartTemperature = sa["start_temprature"].get<double>();
-            if (sa.contains("cooling_rate")) config.saCoolingRate = sa["cooling_rate"].get<double>();
-            if (sa.contains("debug")) config.saDebug = sa["debug"].get<bool>();
-        }
-
         // GA options
-        if (config.algorithm == RecommendAlgorithm::GA && opts.contains("ga_options") && opts["ga_options"].is_object()) {
+        if (opts.contains("ga_options") && opts["ga_options"].is_object()) {
             const auto& ga = opts["ga_options"];
             if (ga.contains("seed")) config.gaSeed = ga["seed"].get<int>();
             if (ga.contains("debug")) config.gaDebug = ga["debug"].get<bool>();

@@ -119,11 +119,9 @@ impl EnginePool {
         let mut state = self.state.lock();
         state.pending_writers += 1;
 
-        let wait_result = self.condvar.wait_while_for(
-            &mut state,
-            |state| state.writer_active || state.active_readers > 0,
-            timeout,
-        );
+        let wait_result = self
+            .condvar
+            .wait_while_for(&mut state, |state| state.writer_active || state.active_readers > 0, timeout);
         if wait_result.timed_out() && (state.writer_active || state.active_readers > 0) {
             state.pending_writers -= 1;
             return Err(EnginePoolError::ExclusiveTimeout(timeout));

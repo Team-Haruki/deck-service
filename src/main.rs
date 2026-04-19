@@ -1,10 +1,3 @@
-mod bridge;
-mod error;
-mod ffi;
-mod handlers;
-mod models;
-mod state;
-
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +9,9 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use bridge::DeckRecommend;
-use state::{AppState, DebugConfig, EnginePool};
+use deck_service::bridge::DeckRecommend;
+use deck_service::handlers;
+use deck_service::state::{AppState, DebugConfig, EnginePool};
 
 #[tokio::main]
 async fn main() {

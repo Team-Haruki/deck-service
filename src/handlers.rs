@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -275,86 +275,144 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
         "Batch recommend request parsed"
     );
 
-    let results = tokio::task::block_in_place(|| {
-        run_engine_op(state.as_ref(), op_id, "recommend_batch", |engine| {
-            let region = req.region;
-            let userdata_hash = req.userdata_hash;
-            let mut responses = Vec::with_capacity(req.batch_options.len());
-            for (index, mut option) in req.batch_options.into_iter().enumerate() {
-                let alg = option
-                    .get("algorithm")
-                    .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned);
-                inject_default_batch_timeout(&mut option, state.as_ref());
-                let timeout_ms = option
-                    .get("timeout_ms")
-                    .and_then(|value| value.as_i64())
-                    .unwrap_or_default();
+    let BatchRecommendRequest {
+        region,
+        batch_options,
+        userdata_hash,
+    } = req;
+    let mut handles = Vec::with_capacity(batch_options.len());
 
-                option.insert("region".into(), json!(region.as_str()));
-                option.insert("userdata_hash".into(), json!(userdata_hash.as_str()));
+    for (index, mut option) in batch_options.into_iter().enumerate() {
+        inject_default_batch_timeout(&mut option, state.as_ref());
+        let alg = option
+            .get("algorithm")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
+        let timeout_ms = option
+            .get("timeout_ms")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
 
-                tracing::debug!(
-                    op_id,
-                    op = "recommend_batch_item",
-                    item_index = index,
-                    region = %region,
-                    algorithm = alg.as_deref().unwrap_or(""),
-                    timeout_ms,
-                    "Starting batch recommendation item"
-                );
+        let state = Arc::clone(&state);
+        let region = region.clone();
+        let userdata_hash = userdata_hash.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            option.insert("region".into(), json!(region.as_str()));
+            option.insert("userdata_hash".into(), json!(userdata_hash.as_str()));
 
-                let started = Instant::now();
-                match engine.recommend_value(&option) {
-                    Ok(result) => {
-                        let elapsed = started.elapsed();
-                        let support_deck_debug = summarize_support_deck_debug(&result);
-                        tracing::info!(
-                            op_id,
-                            op = "recommend_batch_item",
-                            item_index = index,
-                            region = %region,
-                            algorithm = alg.as_deref().unwrap_or(""),
-                            timeout_ms,
-                            elapsed_ms = elapsed_ms(elapsed),
-                            deck_count = result.decks.len(),
-                            support_deck = %support_deck_debug,
-                            "Batch recommendation item completed"
-                        );
-                        responses.push(BatchRecommendResponseItem {
+            tracing::debug!(
+                op_id,
+                op = "recommend_batch_item",
+                item_index = index,
+                region = %region,
+                algorithm = alg.as_deref().unwrap_or(""),
+                timeout_ms,
+                "Starting batch recommendation item"
+            );
+
+            match run_engine_op_with_stats(
+                state.as_ref(),
+                op_id,
+                "recommend_batch_item",
+                |engine| engine.recommend_value(&option),
+            ) {
+                Ok(stats) => {
+                    let support_deck_debug = summarize_support_deck_debug(&stats.value);
+                    tracing::info!(
+                        op_id,
+                        op = "recommend_batch_item",
+                        item_index = index,
+                        region = %region,
+                        algorithm = alg.as_deref().unwrap_or(""),
+                        timeout_ms,
+                        wait_ms = elapsed_ms(stats.lock_elapsed),
+                        elapsed_ms = elapsed_ms(stats.engine_elapsed),
+                        deck_count = stats.value.decks.len(),
+                        support_deck = %support_deck_debug,
+                        "Batch recommendation item completed"
+                    );
+                    (
+                        index,
+                        BatchRecommendResponseItem {
                             alg,
-                            cost_time: elapsed.as_secs_f64(),
-                            wait_time: 0.0,
-                            result: Some(result),
+                            cost_time: stats.engine_elapsed.as_secs_f64(),
+                            wait_time: stats.lock_elapsed.as_secs_f64(),
+                            result: Some(stats.value),
                             error: None,
-                        });
-                    }
-                    Err(err) => {
-                        let elapsed = started.elapsed();
-                        tracing::warn!(
-                            op_id,
-                            op = "recommend_batch_item",
-                            item_index = index,
-                            region = %region,
-                            algorithm = alg.as_deref().unwrap_or(""),
-                            timeout_ms,
-                            elapsed_ms = elapsed_ms(elapsed),
-                            error = %err,
-                            "Batch deck recommendation failed"
-                        );
-                        responses.push(BatchRecommendResponseItem {
+                        },
+                    )
+                }
+                Err(AppError::Engine(err)) => {
+                    tracing::warn!(
+                        op_id,
+                        op = "recommend_batch_item",
+                        item_index = index,
+                        region = %region,
+                        algorithm = alg.as_deref().unwrap_or(""),
+                        timeout_ms,
+                        error = %err,
+                        "Batch deck recommendation failed"
+                    );
+                    (
+                        index,
+                        BatchRecommendResponseItem {
                             alg,
-                            cost_time: elapsed.as_secs_f64(),
+                            cost_time: 0.0,
                             wait_time: 0.0,
                             result: None,
                             error: Some(err),
-                        });
-                    }
+                        },
+                    )
                 }
+                Err(AppError::Timeout(err)) => {
+                    tracing::warn!(
+                        op_id,
+                        op = "recommend_batch_item",
+                        item_index = index,
+                        region = %region,
+                        algorithm = alg.as_deref().unwrap_or(""),
+                        timeout_ms,
+                        error = %err,
+                        "Batch deck recommendation timed out"
+                    );
+                    (
+                        index,
+                        BatchRecommendResponseItem {
+                            alg,
+                            cost_time: 0.0,
+                            wait_time: 0.0,
+                            result: None,
+                            error: Some(err),
+                        },
+                    )
+                }
+                Err(err) => (
+                    index,
+                    BatchRecommendResponseItem {
+                        alg,
+                        cost_time: 0.0,
+                        wait_time: 0.0,
+                        result: None,
+                        error: Some(err.to_string()),
+                    },
+                ),
             }
-            Ok::<Vec<BatchRecommendResponseItem>, String>(responses)
-        })
-    })?;
+        }));
+    }
+
+    let mut results = std::iter::repeat_with(|| None)
+        .take(handles.len())
+        .collect::<Vec<Option<BatchRecommendResponseItem>>>();
+    for handle in handles {
+        let (index, item) = handle
+            .await
+            .map_err(|err| AppError::Engine(format!("batch recommend worker join error: {err}")))?;
+        results[index] = Some(item);
+    }
+    let results = results
+        .into_iter()
+        .map(|item| item.expect("batch recommend worker did not return a response"))
+        .collect::<Vec<_>>();
 
     tracing::info!(
         op_id,
@@ -406,7 +464,11 @@ fn parse_batch_recommend_request(body: &[u8]) -> Result<BatchRecommendRequest, A
 }
 
 fn extract_decompressed_segments(body: &[u8]) -> Result<Vec<Vec<u8>>, AppError> {
-    let payload = zstd::stream::decode_all(Cursor::new(body))
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(body))
+        .map_err(|e| AppError::BadRequest(format!("failed to decode zstd payload: {e}")))?;
+    let mut payload = Vec::new();
+    decoder
+        .read_to_end(&mut payload)
         .map_err(|e| AppError::BadRequest(format!("failed to decode zstd payload: {e}")))?;
 
     let mut segments = Vec::new();
@@ -459,6 +521,7 @@ fn candidate_masterdata_dirs(base_dir: &str, region: &str) -> Vec<PathBuf> {
     if !trimmed_base_dir.is_empty() {
         let base = PathBuf::from(trimmed_base_dir);
         push_candidate(&mut candidates, base.clone());
+        push_candidate(&mut candidates, base.join("master"));
         if !region.is_empty() {
             let base_name_matches_region = base
                 .file_name()
@@ -467,6 +530,11 @@ fn candidate_masterdata_dirs(base_dir: &str, region: &str) -> Vec<PathBuf> {
                 .unwrap_or(false);
             if !base_name_matches_region {
                 push_candidate(&mut candidates, base.join(region));
+                push_candidate(&mut candidates, base.join(region).join("master"));
+            }
+            for repo_dir in region_masterdata_repo_dirs(region) {
+                push_candidate(&mut candidates, base.join(repo_dir));
+                push_candidate(&mut candidates, base.join(repo_dir).join("master"));
             }
         }
     }
@@ -474,9 +542,40 @@ fn candidate_masterdata_dirs(base_dir: &str, region: &str) -> Vec<PathBuf> {
     if !region.is_empty() {
         push_candidate(&mut candidates, PathBuf::from("/data").join(region));
         push_candidate(&mut candidates, PathBuf::from("/masterdata").join(region));
+        push_candidate(
+            &mut candidates,
+            PathBuf::from("/data").join(region).join("master"),
+        );
+        push_candidate(
+            &mut candidates,
+            PathBuf::from("/masterdata").join(region).join("master"),
+        );
+        for repo_dir in region_masterdata_repo_dirs(region) {
+            push_candidate(&mut candidates, PathBuf::from("/data").join(repo_dir));
+            push_candidate(&mut candidates, PathBuf::from("/masterdata").join(repo_dir));
+            push_candidate(
+                &mut candidates,
+                PathBuf::from("/data").join(repo_dir).join("master"),
+            );
+            push_candidate(
+                &mut candidates,
+                PathBuf::from("/masterdata").join(repo_dir).join("master"),
+            );
+        }
     }
 
     candidates
+}
+
+fn region_masterdata_repo_dirs(region: &str) -> &'static [&'static str] {
+    match region {
+        "jp" => &["haruki-sekai-master"],
+        "en" => &["haruki-sekai-en-master"],
+        "kr" => &["haruki-sekai-kr-master"],
+        "cn" => &["haruki-sekai-sc-master"],
+        "tw" => &["haruki-sekai-tc-master"],
+        _ => &[],
+    }
 }
 
 fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
@@ -522,6 +621,24 @@ fn run_engine_op<T, F>(
     op_name: &'static str,
     f: F,
 ) -> Result<T, AppError>
+where
+    F: FnOnce(&DeckRecommend) -> Result<T, String>,
+{
+    Ok(run_engine_op_with_stats(state, op_id, op_name, f)?.value)
+}
+
+struct EngineOpStats<T> {
+    value: T,
+    lock_elapsed: std::time::Duration,
+    engine_elapsed: std::time::Duration,
+}
+
+fn run_engine_op_with_stats<T, F>(
+    state: &AppState,
+    op_id: u64,
+    op_name: &'static str,
+    f: F,
+) -> Result<EngineOpStats<T>, AppError>
 where
     F: FnOnce(&DeckRecommend) -> Result<T, String>,
 {
@@ -582,7 +699,95 @@ where
         }
     }
 
-    result
+    result.map(|value| EngineOpStats {
+        value,
+        lock_elapsed,
+        engine_elapsed,
+    })
+}
+
+fn run_engine_broadcast_op<T, F>(
+    state: &AppState,
+    op_id: u64,
+    op_name: &'static str,
+    mut f: F,
+) -> Result<Vec<T>, AppError>
+where
+    F: FnMut(&DeckRecommend) -> Result<T, String>,
+{
+    let span = tracing::debug_span!("engine_broadcast_op", op_id, op = op_name);
+    let _entered = span.enter();
+
+    let lock_started = Instant::now();
+    tracing::debug!("Waiting for exclusive engine pool access");
+    let engines = match state.engines.checkout_all(state.debug.lock_timeout) {
+        Ok(engines) => engines,
+        Err(err) => {
+            let timeout_message = err.timeout_message();
+            tracing::error!(
+                lock_timeout_ms = elapsed_ms(state.debug.lock_timeout),
+                error = %timeout_message,
+                "Exclusive engine pool lock timed out"
+            );
+            return Err(AppError::Timeout(timeout_message));
+        }
+    };
+    let lock_elapsed = lock_started.elapsed();
+    if lock_elapsed >= state.debug.lock_warn_threshold {
+        tracing::warn!(
+            lock_wait_ms = elapsed_ms(lock_elapsed),
+            threshold_ms = elapsed_ms(state.debug.lock_warn_threshold),
+            engine_count = engines.len(),
+            "Exclusive engine pool wait exceeded threshold"
+        );
+    } else {
+        tracing::debug!(
+            lock_wait_ms = elapsed_ms(lock_elapsed),
+            engine_count = engines.len(),
+            "Exclusive engine pool acquired"
+        );
+    }
+
+    let engine_started = Instant::now();
+    tracing::debug!("Starting broadcast engine operation");
+    let mut results = Vec::with_capacity(engines.len());
+    for engine in engines.iter() {
+        results.push(f(engine).map_err(AppError::Engine)?);
+    }
+    let engine_elapsed = engine_started.elapsed();
+
+    if engine_elapsed >= state.debug.engine_warn_threshold {
+        tracing::warn!(
+            engine_elapsed_ms = elapsed_ms(engine_elapsed),
+            threshold_ms = elapsed_ms(state.debug.engine_warn_threshold),
+            "Broadcast engine operation exceeded threshold"
+        );
+    } else {
+        tracing::debug!(
+            engine_elapsed_ms = elapsed_ms(engine_elapsed),
+            "Broadcast engine operation completed"
+        );
+    }
+
+    Ok(results)
+}
+
+fn expect_consistent_userdata_hashes(hashes: Vec<String>) -> Result<String, AppError> {
+    let Some(first) = hashes.first() else {
+        tracing::error!("Broadcast cache_userdata operation returned no hashes");
+        return Err(AppError::Engine(
+            "cache_userdata returned no engine results".into(),
+        ));
+    };
+
+    if hashes.iter().skip(1).any(|hash| hash != first) {
+        tracing::error!("cache_userdata returned inconsistent hashes across the engine pool");
+        return Err(AppError::Engine(
+            "cache_userdata returned inconsistent hashes across the engine pool".into(),
+        ));
+    }
+
+    Ok(first.clone())
 }
 
 fn run_engine_broadcast_op<T, F>(

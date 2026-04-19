@@ -63,14 +63,17 @@ export BIND_ADDR=0.0.0.0:3000
 # Optional: log level control
 export RUST_LOG=deck_service=info
 
-# Optional: warn when waiting for the engine lock too long (ms)
+# Optional: warn when waiting for an engine slot too long (ms)
 export DECK_LOCK_WARN_MS=1000
 
-# Optional: fail fast if the shared engine lock cannot be acquired in time (ms)
+# Optional: fail fast if an engine slot cannot be acquired in time (ms)
 export DECK_LOCK_TIMEOUT_MS=30000
 
 # Optional: warn when a single engine call runs too long (ms)
 export DECK_ENGINE_WARN_MS=10000
+
+# Optional: number of C++ engine instances kept in the pool (default: min(cpu_count, 4))
+export DECK_ENGINE_POOL_SIZE=4
 
 # Optional: inject a default recommend timeout_ms when the request does not provide one
 export DECK_RECOMMEND_TIMEOUT_MS=15000
@@ -118,8 +121,8 @@ Content-Type: application/json
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `target` | `string` | Optimization target (`"score"`, `"event_point"`, `"mysekai_event_point"`) |
-| `algorithm` | `string` | Search algorithm (`"dfs"`, `"sa"`, `"ga"`) |
+| `target` | `string` | Optimization target (`"score"`, `"skill"`, `"power"`, `"bonus"`) |
+| `algorithm` | `string` | Search algorithm (`"dfs"`, `"ga"`, `"dfs_ga"`, `"rl"`) |
 | `user_data_file_path` | `string` | Path to user data file |
 | `user_data_str` | `string` | User data as inline JSON string |
 | `event_id` | `int` | Event ID |
@@ -137,8 +140,7 @@ Content-Type: application/json
 | `filter_other_unit` | `bool` | Filter cards from other units |
 | `fixed_cards` | `int[]` | Cards that must be in the deck |
 | `fixed_characters` | `int[]` | Characters that must be in the deck |
-| `sa_options` | `object` | Simulated annealing parameters |
-| `ga_options` | `object` | Genetic algorithm parameters |
+| `ga_options` | `object` | Genetic algorithm parameters for `ga`, `dfs_ga`, and `rl` |
 
 **Response:**
 
@@ -221,9 +223,10 @@ POST /update/musicmetas/string
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
 | `BIND_ADDR` | `0.0.0.0:3000` | HTTP server listen address |
 | `RUST_LOG` | `deck_service=info` | Tracing log filter |
-| `DECK_LOCK_WARN_MS` | `1000` | Warn threshold for waiting on the shared engine mutex |
-| `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring the shared engine mutex |
+| `DECK_LOCK_WARN_MS` | `1000` | Warn threshold for waiting on an engine pool slot |
+| `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring an engine pool slot |
 | `DECK_ENGINE_WARN_MS` | `10000` | Warn threshold for a single FFI/engine operation |
+| `DECK_ENGINE_POOL_SIZE` | `min(cpu_count, 4)` | Number of engine instances used for concurrent recommends |
 | `DECK_RECOMMEND_TIMEOUT_MS` | unset | Default `timeout_ms` injected into recommend requests when missing |
 
 ## Debugging Hung Requests
@@ -241,9 +244,29 @@ export DECK_RECOMMEND_TIMEOUT_MS=8000
 This enables per-request `op_id` logs around:
 
 - request admission
-- waiting for the shared engine lock
+- waiting for an engine pool slot
 - entering/leaving each FFI call
 - per-item progress inside batch recommend
+- per-item lock wait / engine execution time inside batch recommend
+
+## Cloud Guide
+
+For production/cloud integration, see [docs/cloud-call-guide.md](docs/cloud-call-guide.md).
+
+## Local Hybrid Benchmark
+
+When `_cpp_src/` and region masterdata are available locally, you can run the built-in hybrid benchmark:
+
+```bash
+cargo run --release --bin hybrid_bench
+```
+
+The benchmark uses local snapshot JSONs under `../metadata/`, loads `music_metas` from `/tmp/music_metas_{region}.json`, and compares:
+
+- `dfs` — exact search with timeout bound
+- `ga` — pure genetic search
+- `dfs_ga` — DFS warmup to seed GA
+- `rl` — learned policy + remembered seeds + seeded GA refine
 
 ## Project Structure
 

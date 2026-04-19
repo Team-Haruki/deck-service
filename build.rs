@@ -33,6 +33,7 @@ fn resolve_cpp_root(root: &Path) -> PathBuf {
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let host = env::var("HOST").unwrap();
     let target = env::var("TARGET").unwrap();
     let root = Path::new(&manifest_dir);
     let cpp_root = resolve_cpp_root(root);
@@ -53,6 +54,10 @@ fn main() {
         .include(&cpp_src)
         .include(&json_include)
         .include(&bridge_dir);
+
+    if host.contains("apple-darwin") && target.contains("musl") {
+        build.archiver("/usr/bin/ar");
+    }
 
     // C++ engine sources
     let sources = [
@@ -75,7 +80,6 @@ fn main() {
         "deck-recommend/event-deck-recommend.cpp",
         "deck-recommend/find-best-cards-dfs.cpp",
         "deck-recommend/find-best-cards-ga.cpp",
-        "deck-recommend/find-best-cards-sa.cpp",
         "deck-recommend/find-target-bonus-cards-dfs.cpp",
         "deck-recommend/find-worldbloom-target-bonus-cards-dfs.cpp",
         "deck-recommend/mysekai-deck-recommend.cpp",
@@ -99,9 +103,9 @@ fn main() {
 
     // Link C++ standard library
     if target.contains("musl") {
-        // musl cross-compile (via zig/cargo-zigbuild): static libc++
-        println!("cargo:rustc-link-lib=static=c++");
-        println!("cargo:rustc-link-lib=static=c++abi");
+        // Let zig resolve musl-target libc++/libc++abi during the final link.
+        println!("cargo:rustc-link-lib=c++");
+        println!("cargo:rustc-link-lib=c++abi");
     } else if target.contains("linux") {
         // native Linux: libstdc++ (GCC)
         println!("cargo:rustc-link-lib=stdc++");

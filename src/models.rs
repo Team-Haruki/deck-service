@@ -111,6 +111,10 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub single_card_configs: Option<Vec<SingleCardConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_master_max: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_skill_max: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_other_unit: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_cards: Option<Vec<i32>>,

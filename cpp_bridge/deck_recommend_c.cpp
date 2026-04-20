@@ -481,6 +481,12 @@ public:
                 config.singleCardConfig[item["card_id"].get<int>()] = cc;
             }
         }
+        if (opts.contains("support_master_max") && !opts["support_master_max"].is_null()) {
+            config.supportMasterMax = opts["support_master_max"].get<bool>();
+        }
+        if (opts.contains("support_skill_max") && !opts["support_skill_max"].is_null()) {
+            config.supportSkillMax = opts["support_skill_max"].get<bool>();
+        }
 
         // GA options
         if (opts.contains("ga_options") && opts["ga_options"].is_object()) {

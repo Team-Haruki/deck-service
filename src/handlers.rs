@@ -10,14 +10,13 @@ use axum::http::{HeaderMap, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use sonic_rs::{JsonValueTrait, json};
 
-use crate::bridge::DeckRecommend;
 use crate::error::AppError;
 use crate::models::{
     BatchRecommendRequest, BatchRecommendResponseItem, CacheUserdataResponse, DeckRecommendOptions,
     DeckRecommendResult, UpdateMasterdataFromJsonRequest, UpdateMasterdataRequest,
     UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest,
 };
-use crate::state::AppState;
+use crate::state::{AppState, EngineLease};
 
 pub async fn health() -> &'static str {
     "ok"
@@ -55,12 +54,14 @@ pub async fn cache_userdata(
         "Userdata payload parsed"
     );
 
-    let userdata_hashes = tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "cache_userdata", |engine| {
-            engine.cache_userdata(&userdata)
+    let userdata_hash = tokio::task::block_in_place(|| {
+        run_engine_op(state.as_ref(), op_id, "cache_userdata", |engine| {
+            let userdata_hash = engine.cache_userdata(&userdata)?;
+            engine.remember_userdata_hash(&userdata_hash);
+            Ok(userdata_hash)
         })
     })?;
-    let userdata_hash = expect_consistent_userdata_hashes(userdata_hashes)?;
+    state.userdata_cache.remember(&userdata_hash, &userdata);
 
     tracing::info!(
         op_id,
@@ -124,7 +125,7 @@ pub async fn update_masterdata(
         );
     }
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_masterdata", |engine| {
+        run_engine_broadcast_op(state.as_ref(), op_id, "update_masterdata", true, |engine| {
             engine.update_masterdata(&resolved_base_dir, &req.region)
         })
     })?;
@@ -151,9 +152,13 @@ pub async fn update_masterdata_from_json(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_masterdata_from_json", |engine| {
-            engine.update_masterdata_from_json(&req.data, &req.region)
-        })
+        run_engine_broadcast_op(
+            state.as_ref(),
+            op_id,
+            "update_masterdata_from_json",
+            true,
+            |engine| engine.update_masterdata_from_json(&req.data, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -178,7 +183,7 @@ pub async fn update_musicmetas(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_musicmetas", |engine| {
+        run_engine_broadcast_op(state.as_ref(), op_id, "update_musicmetas", true, |engine| {
             engine.update_musicmetas(&req.file_path, &req.region)
         })
     })?;
@@ -205,9 +210,13 @@ pub async fn update_musicmetas_from_string(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_musicmetas_from_string", |engine| {
-            engine.update_musicmetas_from_string(&req.data, &req.region)
-        })
+        run_engine_broadcast_op(
+            state.as_ref(),
+            op_id,
+            "update_musicmetas_from_string",
+            true,
+            |engine| engine.update_musicmetas_from_string(&req.data, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -223,6 +232,8 @@ async fn recommend_legacy(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resu
     let mut options: DeckRecommendOptions = sonic_rs::from_slice(body.as_ref())
         .map_err(|e| AppError::BadRequest(format!("invalid recommend payload: {e}")))?;
     inject_default_recommend_timeout(&mut options, state.as_ref());
+    let userdata_hash = normalize_userdata_hash(options.userdata_hash.as_deref());
+    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
     tracing::info!(
         op_id,
         op = "recommend_legacy",
@@ -238,6 +249,11 @@ async fn recommend_legacy(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resu
 
     let result: DeckRecommendResult = tokio::task::block_in_place(|| {
         run_engine_op(state.as_ref(), op_id, "recommend_legacy", |engine| {
+            if let (Some(userdata_hash), Some(userdata_payload)) =
+                (userdata_hash.as_deref(), userdata_payload.as_deref())
+            {
+                ensure_userdata_hash(engine, userdata_hash, userdata_payload.as_ref())?;
+            }
             engine.recommend(&options)
         })
     })?;
@@ -280,6 +296,8 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
         batch_options,
         userdata_hash,
     } = req;
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?.expect("batch recommend requires userdata payload");
     let mut handles = Vec::with_capacity(batch_options.len());
 
     for (index, mut option) in batch_options.into_iter().enumerate() {
@@ -296,6 +314,7 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
         let state = Arc::clone(&state);
         let region = region.clone();
         let userdata_hash = userdata_hash.clone();
+        let userdata_payload = Arc::clone(&userdata_payload);
         handles.push(tokio::task::spawn_blocking(move || {
             option.insert("region".into(), json!(region.as_str()));
             option.insert("userdata_hash".into(), json!(userdata_hash.as_str()));
@@ -314,7 +333,10 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
                 state.as_ref(),
                 op_id,
                 "recommend_batch_item",
-                |engine| engine.recommend_value(&option),
+                |engine| {
+                    ensure_userdata_hash(engine, &userdata_hash, userdata_payload.as_ref())?;
+                    engine.recommend_value(&option)
+                },
             ) {
                 Ok(stats) => {
                     let support_deck_debug = summarize_support_deck_debug(&stats.value);
@@ -615,6 +637,52 @@ fn inject_default_batch_timeout(option: &mut crate::models::BatchRecommendOption
     }
 }
 
+fn normalize_userdata_hash(userdata_hash: Option<&str>) -> Option<String> {
+    let hash = userdata_hash?.trim();
+    if hash.is_empty() {
+        return None;
+    }
+    Some(hash.to_string())
+}
+
+fn resolve_userdata_payload(
+    state: &AppState,
+    userdata_hash: Option<&str>,
+) -> Result<Option<Arc<str>>, AppError> {
+    let Some(userdata_hash) = normalize_userdata_hash(userdata_hash) else {
+        return Ok(None);
+    };
+    match state.userdata_cache.get(&userdata_hash) {
+        Some(payload) => Ok(Some(payload)),
+        None => Err(AppError::BadRequest(format!(
+            "unknown userdata_hash: {userdata_hash}; call /cache_userdata first"
+        ))),
+    }
+}
+
+fn ensure_userdata_hash(
+    engine: &mut EngineLease<'_>,
+    userdata_hash: &str,
+    userdata_payload: &str,
+) -> Result<(), String> {
+    if engine.has_userdata_hash(userdata_hash) {
+        return Ok(());
+    }
+
+    let cached_hash = engine.cache_userdata(userdata_payload)?;
+    if cached_hash != userdata_hash.trim() {
+        engine.forget_userdata_hash(userdata_hash);
+        return Err(format!(
+            "cache_userdata hash mismatch: expected {}, got {}",
+            userdata_hash.trim(),
+            cached_hash
+        ));
+    }
+
+    engine.remember_userdata_hash(&cached_hash);
+    Ok(())
+}
+
 fn run_engine_op<T, F>(
     state: &AppState,
     op_id: u64,
@@ -622,7 +690,7 @@ fn run_engine_op<T, F>(
     f: F,
 ) -> Result<T, AppError>
 where
-    F: FnOnce(&DeckRecommend) -> Result<T, String>,
+    F: FnOnce(&mut EngineLease<'_>) -> Result<T, String>,
 {
     Ok(run_engine_op_with_stats(state, op_id, op_name, f)?.value)
 }
@@ -640,14 +708,14 @@ fn run_engine_op_with_stats<T, F>(
     f: F,
 ) -> Result<EngineOpStats<T>, AppError>
 where
-    F: FnOnce(&DeckRecommend) -> Result<T, String>,
+    F: FnOnce(&mut EngineLease<'_>) -> Result<T, String>,
 {
     let span = tracing::debug_span!("engine_op", op_id, op = op_name);
     let _entered = span.enter();
 
     let lock_started = Instant::now();
     tracing::debug!("Waiting for engine slot");
-    let engine = match state.engines.checkout(state.debug.lock_timeout) {
+    let mut engine = match state.engines.checkout(state.debug.lock_timeout) {
         Ok(engine) => engine,
         Err(err) => {
             let timeout_message = err.timeout_message();
@@ -672,7 +740,7 @@ where
 
     let engine_started = Instant::now();
     tracing::debug!("Starting engine operation");
-    let result = f(&engine).map_err(AppError::Engine);
+    let result = f(&mut engine).map_err(AppError::Engine);
     let engine_elapsed = engine_started.elapsed();
 
     match &result {
@@ -710,17 +778,18 @@ fn run_engine_broadcast_op<T, F>(
     state: &AppState,
     op_id: u64,
     op_name: &'static str,
+    clear_userdata_cache_on_success: bool,
     mut f: F,
 ) -> Result<Vec<T>, AppError>
 where
-    F: FnMut(&DeckRecommend) -> Result<T, String>,
+    F: FnMut(&crate::bridge::DeckRecommend) -> Result<T, String>,
 {
     let span = tracing::debug_span!("engine_broadcast_op", op_id, op = op_name);
     let _entered = span.enter();
 
     let lock_started = Instant::now();
     tracing::debug!("Waiting for exclusive engine pool access");
-    let engines = match state.engines.checkout_all(state.debug.lock_timeout) {
+    let mut engines = match state.engines.checkout_all(state.debug.lock_timeout) {
         Ok(engines) => engines,
         Err(err) => {
             let timeout_message = err.timeout_message();
@@ -754,6 +823,15 @@ where
     for engine in engines.iter() {
         results.push(f(engine).map_err(AppError::Engine)?);
     }
+    if clear_userdata_cache_on_success {
+        engines.clear_userdata_hashes();
+        state.userdata_cache.clear();
+        tracing::info!(
+            op_id,
+            op = op_name,
+            "Cleared cached userdata state after broadcast engine update"
+        );
+    }
     let engine_elapsed = engine_started.elapsed();
 
     if engine_elapsed >= state.debug.engine_warn_threshold {
@@ -771,25 +849,6 @@ where
 
     Ok(results)
 }
-
-fn expect_consistent_userdata_hashes(hashes: Vec<String>) -> Result<String, AppError> {
-    let Some(first) = hashes.first() else {
-        tracing::error!("Broadcast cache_userdata operation returned no hashes");
-        return Err(AppError::Engine(
-            "cache_userdata returned no engine results".into(),
-        ));
-    };
-
-    if hashes.iter().skip(1).any(|hash| hash != first) {
-        tracing::error!("cache_userdata returned inconsistent hashes across the engine pool");
-        return Err(AppError::Engine(
-            "cache_userdata returned inconsistent hashes across the engine pool".into(),
-        ));
-    }
-
-    Ok(first.clone())
-}
-
 fn elapsed_ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }

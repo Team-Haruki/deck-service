@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ pub struct AppState {
     pub engines: EnginePool,
     pub next_op_id: AtomicU64,
     pub debug: DebugConfig,
+    pub userdata_cache: UserdataCache,
 }
 
 impl AppState {
@@ -31,11 +34,41 @@ pub struct EnginePool {
     size: usize,
 }
 
+struct EngineSlot {
+    engine: DeckRecommend,
+    userdata_hashes: HashSet<String>,
+}
+
 struct EnginePoolState {
-    available: Vec<DeckRecommend>,
+    available: Vec<EngineSlot>,
     active_readers: usize,
     writer_active: bool,
     pending_writers: usize,
+}
+
+#[derive(Default)]
+pub struct UserdataCache {
+    entries: Mutex<HashMap<String, Arc<str>>>,
+}
+
+impl UserdataCache {
+    pub fn remember(&self, hash: &str, userdata: &str) {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return;
+        }
+        self.entries
+            .lock()
+            .insert(hash.to_string(), Arc::<str>::from(userdata.to_string()));
+    }
+
+    pub fn get(&self, hash: &str) -> Option<Arc<str>> {
+        self.entries.lock().get(hash.trim()).cloned()
+    }
+
+    pub fn clear(&self) {
+        self.entries.lock().clear();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +92,7 @@ impl EnginePoolError {
 
 pub struct EngineLease<'a> {
     pool: &'a EnginePool,
-    engine: Option<DeckRecommend>,
+    slot: Option<EngineSlot>,
 }
 
 impl EnginePool {
@@ -67,7 +100,10 @@ impl EnginePool {
         let size = size.max(1);
         let mut available = Vec::with_capacity(size);
         for _ in 0..size {
-            available.push(DeckRecommend::new()?);
+            available.push(EngineSlot {
+                engine: DeckRecommend::new()?,
+                userdata_hashes: HashSet::new(),
+            });
         }
 
         Ok(Self {
@@ -100,7 +136,7 @@ impl EnginePool {
         }
 
         state.active_readers += 1;
-        let engine = state
+        let slot = state
             .available
             .pop()
             .expect("engine pool signaled availability without an engine");
@@ -108,7 +144,7 @@ impl EnginePool {
 
         Ok(EngineLease {
             pool: self,
-            engine: Some(engine),
+            slot: Some(slot),
         })
     }
 
@@ -139,17 +175,56 @@ impl std::ops::Deref for EngineLease<'_> {
     type Target = DeckRecommend;
 
     fn deref(&self) -> &Self::Target {
-        self.engine
+        &self
+            .slot
             .as_ref()
             .expect("engine lease accessed after release")
+            .engine
+    }
+}
+
+impl EngineLease<'_> {
+    pub fn has_userdata_hash(&self, hash: &str) -> bool {
+        let hash = hash.trim();
+        !hash.is_empty()
+            && self
+                .slot
+                .as_ref()
+                .expect("engine lease accessed after release")
+                .userdata_hashes
+                .contains(hash)
+    }
+
+    pub fn remember_userdata_hash(&mut self, hash: &str) {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return;
+        }
+        self.slot
+            .as_mut()
+            .expect("engine lease accessed after release")
+            .userdata_hashes
+            .insert(hash.to_string());
+    }
+
+    pub fn forget_userdata_hash(&mut self, hash: &str) {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return;
+        }
+        self.slot
+            .as_mut()
+            .expect("engine lease accessed after release")
+            .userdata_hashes
+            .remove(hash);
     }
 }
 
 impl Drop for EngineLease<'_> {
     fn drop(&mut self) {
         let mut state = self.pool.state.lock();
-        if let Some(engine) = self.engine.take() {
-            state.available.push(engine);
+        if let Some(slot) = self.slot.take() {
+            state.available.push(slot);
             state.active_readers = state.active_readers.saturating_sub(1);
         }
         drop(state);
@@ -168,7 +243,13 @@ impl ExclusiveEngineLease<'_> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &DeckRecommend> {
-        self.state.available.iter()
+        self.state.available.iter().map(|slot| &slot.engine)
+    }
+
+    pub fn clear_userdata_hashes(&mut self) {
+        for slot in &mut self.state.available {
+            slot.userdata_hashes.clear();
+        }
     }
 }
 

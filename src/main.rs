@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
-use deck_service::state::{AppState, DebugConfig, EnginePool};
+use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
 
 #[tokio::main]
 async fn main() {
@@ -48,6 +48,7 @@ async fn main() {
             engine_warn_threshold,
             default_recommend_timeout_ms,
         },
+        userdata_cache: UserdataCache::default(),
     });
 
     tracing::info!(

@@ -227,7 +227,11 @@ pub async fn update_musicmetas_from_string(
     Ok(Json(json!({ "status": "ok" })))
 }
 
-async fn recommend_legacy(state: Arc<AppState>, body: Bytes, op_id: u64) -> Result<Response, AppError> {
+async fn recommend_legacy(
+    state: Arc<AppState>,
+    body: Bytes,
+    op_id: u64,
+) -> Result<Response, AppError> {
     let request_started = Instant::now();
     let mut options: DeckRecommendOptions = sonic_rs::from_slice(body.as_ref())
         .map_err(|e| AppError::BadRequest(format!("invalid recommend payload: {e}")))?;
@@ -252,7 +256,7 @@ async fn recommend_legacy(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resu
             if let (Some(userdata_hash), Some(userdata_payload)) =
                 (userdata_hash.as_deref(), userdata_payload.as_deref())
             {
-                ensure_userdata_hash(engine, userdata_hash, userdata_payload.as_ref())?;
+                ensure_userdata_hash(engine, userdata_hash, userdata_payload)?;
             }
             engine.recommend(&options)
         })
@@ -269,7 +273,11 @@ async fn recommend_legacy(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resu
     Ok(Json(result).into_response())
 }
 
-async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Result<Response, AppError> {
+async fn recommend_batch(
+    state: Arc<AppState>,
+    body: Bytes,
+    op_id: u64,
+) -> Result<Response, AppError> {
     let request_started = Instant::now();
     let req = parse_batch_recommend_request(body.as_ref())?;
 
@@ -296,8 +304,8 @@ async fn recommend_batch(state: Arc<AppState>, body: Bytes, op_id: u64) -> Resul
         batch_options,
         userdata_hash,
     } = req;
-    let userdata_payload =
-        resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?.expect("batch recommend requires userdata payload");
+    let userdata_payload = resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?
+        .expect("batch recommend requires userdata payload");
     let mut handles = Vec::with_capacity(batch_options.len());
 
     for (index, mut option) in batch_options.into_iter().enumerate() {
@@ -521,7 +529,9 @@ fn extract_decompressed_segments(body: &[u8]) -> Result<Vec<Vec<u8>>, AppError> 
     }
 
     if segments.is_empty() {
-        return Err(AppError::BadRequest("payload does not contain any segments".into()));
+        return Err(AppError::BadRequest(
+            "payload does not contain any segments".into(),
+        ));
     }
 
     Ok(segments)
@@ -540,7 +550,10 @@ fn inject_default_recommend_timeout(options: &mut DeckRecommendOptions, state: &
     }
 }
 
-fn inject_default_batch_timeout(option: &mut crate::models::BatchRecommendOption, state: &AppState) {
+fn inject_default_batch_timeout(
+    option: &mut crate::models::BatchRecommendOption,
+    state: &AppState,
+) {
     if option.get("timeout_ms").is_some() {
         return;
     }
@@ -651,7 +664,10 @@ where
             "Engine slot wait exceeded threshold"
         );
     } else {
-        tracing::debug!(lock_wait_ms = elapsed_ms(lock_elapsed), "Engine slot acquired");
+        tracing::debug!(
+            lock_wait_ms = elapsed_ms(lock_elapsed),
+            "Engine slot acquired"
+        );
     }
 
     let engine_started = Instant::now();

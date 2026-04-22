@@ -41,7 +41,10 @@ unsafe extern "C" {
 }
 
 /// Convert a C error string to a Rust Result, freeing the C string.
-pub fn check_error(err: *const c_char) -> Result<(), String> {
+///
+/// # Safety
+/// `err` must be either null or a valid pointer returned from the C bridge.
+pub unsafe fn check_error(err: *const c_char) -> Result<(), String> {
     if err.is_null() {
         Ok(())
     } else {

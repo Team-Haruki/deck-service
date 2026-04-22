@@ -28,7 +28,7 @@ impl DeckRecommend {
         tracing::debug!(data_path = %path, "ffi init_data_path start");
         let c_path = ffi::to_cstring(path);
         let err = unsafe { ffi::deck_recommend_init_data_path(c_path.as_ptr()) };
-        let result = ffi::check_error(err);
+        let result = unsafe { ffi::check_error(err) };
         if result.is_ok() {
             tracing::debug!(
                 elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -46,7 +46,7 @@ impl DeckRecommend {
         let err = unsafe {
             ffi::deck_recommend_update_masterdata(self.handle, c_dir.as_ptr(), c_region.as_ptr())
         };
-        let result = ffi::check_error(err);
+        let result = unsafe { ffi::check_error(err) };
         if result.is_ok() {
             tracing::debug!(
                 region = %region,
@@ -78,7 +78,7 @@ impl DeckRecommend {
                 c_region.as_ptr(),
             )
         };
-        let result = ffi::check_error(err);
+        let result = unsafe { ffi::check_error(err) };
         if result.is_ok() {
             tracing::debug!(
                 region = %region,
@@ -98,7 +98,7 @@ impl DeckRecommend {
         let err = unsafe {
             ffi::deck_recommend_update_musicmetas(self.handle, c_path.as_ptr(), c_region.as_ptr())
         };
-        let result = ffi::check_error(err);
+        let result = unsafe { ffi::check_error(err) };
         if result.is_ok() {
             tracing::debug!(
                 region = %region,
@@ -125,7 +125,7 @@ impl DeckRecommend {
                 c_region.as_ptr(),
             )
         };
-        let result = ffi::check_error(err);
+        let result = unsafe { ffi::check_error(err) };
         if result.is_ok() {
             tracing::debug!(
                 region = %region,
@@ -144,7 +144,7 @@ impl DeckRecommend {
         let err = unsafe {
             ffi::deck_recommend_cache_userdata(self.handle, c_data.as_ptr(), &mut hash_out)
         };
-        ffi::check_error(err)?;
+        unsafe { ffi::check_error(err) }?;
         if hash_out.is_null() {
             return Err("deck_recommend_cache_userdata returned empty hash".into());
         }

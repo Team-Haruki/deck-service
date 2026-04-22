@@ -41,7 +41,10 @@ fn main() {
     let json_include = cpp_root.join("3rdparty/json/single_include");
     let bridge_dir = root.join("cpp_bridge");
 
-    println!("cargo:warning=Using deck engine source at {}", cpp_root.display());
+    println!(
+        "cargo:warning=Using deck engine source at {}",
+        cpp_root.display()
+    );
     println!("cargo:rerun-if-env-changed=DECK_CPP_SRC");
 
     let mut build = cc::Build::new();

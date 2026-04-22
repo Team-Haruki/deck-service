@@ -84,7 +84,10 @@ impl EnginePoolError {
                 format!("engine checkout timeout after {} ms", timeout.as_millis())
             }
             EnginePoolError::ExclusiveTimeout(timeout) => {
-                format!("engine exclusive lock timeout after {} ms", timeout.as_millis())
+                format!(
+                    "engine exclusive lock timeout after {} ms",
+                    timeout.as_millis()
+                )
             }
         }
     }
@@ -155,9 +158,11 @@ impl EnginePool {
         let mut state = self.state.lock();
         state.pending_writers += 1;
 
-        let wait_result = self
-            .condvar
-            .wait_while_for(&mut state, |state| state.writer_active || state.active_readers > 0, timeout);
+        let wait_result = self.condvar.wait_while_for(
+            &mut state,
+            |state| state.writer_active || state.active_readers > 0,
+            timeout,
+        );
         if wait_result.timed_out() && (state.writer_active || state.active_readers > 0) {
             state.pending_writers -= 1;
             return Err(EnginePoolError::ExclusiveTimeout(timeout));
@@ -240,6 +245,10 @@ pub struct ExclusiveEngineLease<'a> {
 impl ExclusiveEngineLease<'_> {
     pub fn len(&self) -> usize {
         self.state.available.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.available.is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &DeckRecommend> {

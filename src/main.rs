@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
+use deck_service::masterdata::resolve_masterdata_base_dir;
 use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
 
 #[tokio::main]
@@ -50,6 +51,8 @@ async fn main() {
         },
         userdata_cache: UserdataCache::default(),
     });
+
+    preload_masterdata(state.as_ref());
 
     tracing::info!(
         lock_warn_ms = lock_warn_threshold.as_millis() as u64,
@@ -162,4 +165,93 @@ fn default_engine_pool_size() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get().min(4))
         .unwrap_or(1)
+}
+
+fn preload_masterdata(state: &AppState) {
+    let requested_base_dir = env::var("DECK_MASTERDATA_DIR")
+        .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
+        .unwrap_or_default();
+    let regions = env_csv(
+        "DECK_MASTERDATA_REGIONS",
+        &["jp", "en", "cn", "tw", "kr"],
+    );
+
+    for region in regions {
+        let resolved_base_dir = resolve_masterdata_base_dir(&requested_base_dir, &region);
+        if resolved_base_dir.trim().is_empty() {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                "Skipping masterdata preload because no directory was resolved"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            region = %region,
+            requested_base_dir = %requested_base_dir,
+            resolved_base_dir = %resolved_base_dir,
+            "Preloading deck-service masterdata"
+        );
+
+        let mut engines = match state.engines.checkout_all(state.debug.lock_timeout) {
+            Ok(engines) => engines,
+            Err(err) => {
+                tracing::error!(
+                    region = %region,
+                    requested_base_dir = %requested_base_dir,
+                    resolved_base_dir = %resolved_base_dir,
+                    error = %err.timeout_message(),
+                    "Failed to lock engine pool for masterdata preload"
+                );
+                continue;
+            }
+        };
+
+        let mut failed = false;
+        for engine in engines.iter() {
+            if let Err(err) = engine.update_masterdata(&resolved_base_dir, &region) {
+                failed = true;
+                tracing::error!(
+                    region = %region,
+                    resolved_base_dir = %resolved_base_dir,
+                    error = %err,
+                    "Failed to preload deck-service masterdata"
+                );
+                break;
+            }
+        }
+
+        if failed {
+            continue;
+        }
+
+        engines.clear_userdata_hashes();
+        state.userdata_cache.clear();
+        tracing::info!(
+            region = %region,
+            resolved_base_dir = %resolved_base_dir,
+            engine_count = engines.len(),
+            "Preloaded deck-service masterdata"
+        );
+    }
+}
+
+fn env_csv(name: &str, default: &[&str]) -> Vec<String> {
+    match env::var(name) {
+        Ok(raw) => {
+            let values = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| item.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                default.iter().map(|item| (*item).to_string()).collect()
+            } else {
+                values
+            }
+        }
+        Err(_) => default.iter().map(|item| (*item).to_string()).collect(),
+    }
 }

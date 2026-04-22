@@ -74,7 +74,8 @@ fn region_masterdata_repo_dirs(region: &str) -> &'static [&'static str] {
 }
 
 fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if candidate.as_os_str().is_empty() || candidates.iter().any(|existing| existing == &candidate) {
+    if candidate.as_os_str().is_empty() || candidates.iter().any(|existing| existing == &candidate)
+    {
         return;
     }
     candidates.push(candidate);

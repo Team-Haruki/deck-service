@@ -171,10 +171,7 @@ fn preload_masterdata(state: &AppState) {
     let requested_base_dir = env::var("DECK_MASTERDATA_DIR")
         .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
         .unwrap_or_default();
-    let regions = env_csv(
-        "DECK_MASTERDATA_REGIONS",
-        &["jp", "en", "cn", "tw", "kr"],
-    );
+    let regions = env_csv("DECK_MASTERDATA_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
 
     for region in regions {
         let resolved_base_dir = resolve_masterdata_base_dir(&requested_base_dir, &region);

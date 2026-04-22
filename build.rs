@@ -80,6 +80,7 @@ fn main() {
         "deck-recommend/event-deck-recommend.cpp",
         "deck-recommend/find-best-cards-dfs.cpp",
         "deck-recommend/find-best-cards-ga.cpp",
+        "deck-recommend/find-best-cards-sa.cpp",
         "deck-recommend/find-target-bonus-cards-dfs.cpp",
         "deck-recommend/find-worldbloom-target-bonus-cards-dfs.cpp",
         "deck-recommend/mysekai-deck-recommend.cpp",

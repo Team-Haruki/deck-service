@@ -21,7 +21,9 @@ RUN cargo install cargo-zigbuild && \
 WORKDIR /build
 
 # Clone C++ engine source
-RUN git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src && \
+ARG DECK_CPP_REPO=https://github.com/Deseer/sekai-deck-recommend-cpp.git
+ARG DECK_CPP_REF=master
+RUN git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src && \
     cd _cpp_src && git submodule update --init --recursive
 
 # Copy project files

@@ -92,7 +92,7 @@ static const std::map<std::string, Region> REGION_MAP = {
 
 static const std::set<std::string> VALID_TARGETS = {"score","skill","power","bonus"};
 static const std::set<std::string> VALID_ALGORITHMS = {
-    "dfs", "ga", "dfs_ga", "dfs-ga", "rl"
+    "sa", "dfs", "ga", "dfs_ga", "dfs-ga", "rl"
 };
 static const std::set<std::string> VALID_MUSIC_DIFFS = {"easy","normal","hard","expert","master","append"};
 static const std::set<std::string> VALID_LIVE_TYPES = {"multi","solo","challenge","cheerful","auto","mysekai","challenge_auto"};
@@ -342,7 +342,8 @@ public:
         // algorithm
         std::string algorithm = opts.value("algorithm", "ga");
         if (!VALID_ALGORITHMS.count(algorithm)) throw std::invalid_argument("Invalid algorithm: " + algorithm);
-        if (algorithm == "dfs") config.algorithm = RecommendAlgorithm::DFS;
+        if (algorithm == "sa") config.algorithm = RecommendAlgorithm::SA;
+        else if (algorithm == "dfs") config.algorithm = RecommendAlgorithm::DFS;
         else if (algorithm == "ga") config.algorithm = RecommendAlgorithm::GA;
         else if (algorithm == "dfs_ga" || algorithm == "dfs-ga") config.algorithm = RecommendAlgorithm::DFS_GA;
         else if (algorithm == "rl") config.algorithm = RecommendAlgorithm::RL;
@@ -383,10 +384,26 @@ public:
             config.fixedCharacters = opts["fixed_characters"].get<std::vector<int>>();
             if ((int)config.fixedCharacters.size() > config.member)
                 throw std::invalid_argument("Fixed characters size exceeds member count.");
-            if (!config.fixedCards.empty())
-                throw std::invalid_argument("fixed_characters and fixed_cards cannot be used together.");
             if (is_challenge)
                 throw std::invalid_argument("fixed_characters is not valid for challenge live.");
+            for (auto characterId : config.fixedCharacters) {
+                if (characterId < 1 || characterId > 26)
+                    throw std::invalid_argument("Invalid fixed character ID: " + std::to_string(characterId));
+            }
+        }
+
+        // final chapter forced leader
+        const char* forcedLeaderKey = nullptr;
+        if (opts.contains("forced_leader_character_id") && !opts["forced_leader_character_id"].is_null()) {
+            forcedLeaderKey = "forced_leader_character_id";
+        } else if (opts.contains("forcedLeaderCharacterId") && !opts["forcedLeaderCharacterId"].is_null()) {
+            forcedLeaderKey = "forcedLeaderCharacterId";
+        }
+        if (forcedLeaderKey != nullptr) {
+            auto characterId = opts[forcedLeaderKey].get<int>();
+            if (characterId < 1 || characterId > 26)
+                throw std::invalid_argument("Invalid forced leader character ID: " + std::to_string(characterId));
+            config.forcedLeaderCharacterId = characterId;
         }
 
         // skill reference choose strategy
@@ -486,6 +503,42 @@ public:
         }
         if (opts.contains("support_skill_max") && !opts["support_skill_max"].is_null()) {
             config.supportSkillMax = opts["support_skill_max"].get<bool>();
+        }
+
+        // SA options
+        if (opts.contains("sa_options") && opts["sa_options"].is_object()) {
+            const auto& sa = opts["sa_options"];
+            if (sa.contains("run_num")) config.saRunCount = sa["run_num"].get<int>();
+            if (config.saRunCount < 1)
+                throw std::invalid_argument("Invalid sa run count: " + std::to_string(config.saRunCount));
+
+            if (sa.contains("seed")) config.saSeed = sa["seed"].get<int>();
+
+            if (sa.contains("max_iter")) config.saMaxIter = sa["max_iter"].get<int>();
+            if (config.saMaxIter < 1)
+                throw std::invalid_argument("Invalid sa max iter: " + std::to_string(config.saMaxIter));
+
+            if (sa.contains("max_no_improve_iter"))
+                config.saMaxIterNoImprove = sa["max_no_improve_iter"].get<int>();
+            if (config.saMaxIterNoImprove < 1)
+                throw std::invalid_argument("Invalid sa max no improve iter: " + std::to_string(config.saMaxIterNoImprove));
+
+            if (sa.contains("time_limit_ms")) config.saMaxTimeMs = sa["time_limit_ms"].get<int>();
+            if (config.saMaxTimeMs < 0)
+                throw std::invalid_argument("Invalid sa max time ms: " + std::to_string(config.saMaxTimeMs));
+
+            if (sa.contains("start_temprature"))
+                config.saStartTemperature = sa["start_temprature"].get<double>();
+            else if (sa.contains("start_temperature"))
+                config.saStartTemperature = sa["start_temperature"].get<double>();
+            if (config.saStartTemperature < 0)
+                throw std::invalid_argument("Invalid sa start temperature: " + std::to_string(config.saStartTemperature));
+
+            if (sa.contains("cooling_rate")) config.saCoolingRate = sa["cooling_rate"].get<double>();
+            if (config.saCoolingRate < 0 || config.saCoolingRate > 1)
+                throw std::invalid_argument("Invalid sa cooling rate: " + std::to_string(config.saCoolingRate));
+
+            if (sa.contains("debug")) config.saDebug = sa["debug"].get<bool>();
         }
 
         // GA options

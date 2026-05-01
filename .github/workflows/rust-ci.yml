@@ -24,6 +24,8 @@ on:
 
 env:
   ZIG_VERSION: "0.15.2"
+  DECK_CPP_REPO: "https://github.com/Deseer/sekai-deck-recommend-cpp.git"
+  DECK_CPP_REF: "master"
 
 jobs:
   build:
@@ -35,7 +37,7 @@ jobs:
 
       - name: Clone C++ engine source
         run: |
-          git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+          git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src
           cd _cpp_src && git submodule update --init --recursive
 
       - name: Set up Rust
@@ -66,7 +68,7 @@ jobs:
 
       - name: Clone C++ engine source
         run: |
-          git clone --depth 1 https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+          git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src
           cd _cpp_src && git submodule update --init --recursive
 
       - name: Install Zig

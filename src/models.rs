@@ -39,6 +39,26 @@ pub struct SingleCardConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct SaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_num: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iter: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_no_improve_iter: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_limit_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", alias = "start_temperature")]
+    pub start_temprature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooling_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<i32>,
@@ -120,6 +140,11 @@ pub struct DeckRecommendOptions {
     pub fixed_cards: Option<Vec<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_characters: Option<Vec<i32>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "forcedLeaderCharacterId"
+    )]
+    pub forced_leader_character_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_bonus_list: Option<Vec<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +163,8 @@ pub struct DeckRecommendOptions {
     pub skill_order_choose_strategy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specific_skill_order: Option<Vec<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sa_options: Option<SaOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ga_options: Option<GaOptions>,
 }

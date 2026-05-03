@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const LIB_NAME: &str = "deck_recommend";
 const BRIDGE_SOURCE: &str = "deck_recommend_c.cpp";
@@ -93,6 +93,59 @@ fn try_run(command: &mut Command) -> Result<(), String> {
     Err(format!("status {}\n{stdout}{stderr}", output.status))
 }
 
+fn discover_libstdcpp_include_dirs() -> Vec<PathBuf> {
+    let output = Command::new("c++")
+        .args(["-E", "-x", "c++", "-", "-v"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|err| panic!("failed to discover libstdc++ include paths with c++: {err}"));
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "failed to discover libstdc++ include paths with c++ (status {})\n{stdout}{stderr}",
+            output.status
+        );
+    }
+
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut include_dirs = Vec::new();
+    let mut in_search_list = false;
+
+    for line in output_text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#include <...> search starts here:" {
+            in_search_list = true;
+            continue;
+        }
+        if trimmed == "End of search list." {
+            break;
+        }
+        if !in_search_list {
+            continue;
+        }
+        if !trimmed.contains("/c++/") {
+            continue;
+        }
+
+        let path = PathBuf::from(trimmed);
+        if path.is_dir() && !include_dirs.iter().any(|existing| existing == &path) {
+            include_dirs.push(path);
+        }
+    }
+
+    if include_dirs.is_empty() {
+        panic!("unable to discover libstdc++ include paths from c++ -v output");
+    }
+
+    include_dirs
+}
+
 fn static_lib_path(lib_dir: &Path) -> PathBuf {
     lib_dir.join(format!("lib{LIB_NAME}.a"))
 }
@@ -102,6 +155,7 @@ fn run_zig_build(
     cpp_root: &Path,
     out_dir: &Path,
     zig_target: &str,
+    libstdcpp_include_dirs: &[PathBuf],
 ) -> Result<PathBuf, String> {
     let prefix = out_dir.join("zig-build");
     let mut command = Command::new("zig");
@@ -110,9 +164,11 @@ fn run_zig_build(
         .arg("build")
         .arg(format!("-Dcpp-root={}", cpp_root.display()))
         .arg(format!("-Dtarget={zig_target}"))
-        .arg("-Doptimize=ReleaseFast")
-        .arg("--prefix")
-        .arg(&prefix);
+        .arg("-Doptimize=ReleaseFast");
+    for include_dir in libstdcpp_include_dirs {
+        command.arg(format!("-Dlibstdcpp-include={}", include_dir.display()));
+    }
+    command.arg("--prefix").arg(&prefix);
 
     try_run(&mut command)?;
 
@@ -272,6 +328,11 @@ fn main() {
     let cpp_root = resolve_cpp_root(root);
     let zig_target = zig_target_for(&target);
     let use_libstdcpp = use_libstdcpp(&target);
+    let libstdcpp_include_dirs = if use_libstdcpp {
+        discover_libstdcpp_include_dirs()
+    } else {
+        Vec::new()
+    };
 
     println!(
         "cargo:warning=Using deck engine source at {}",
@@ -282,7 +343,13 @@ fn main() {
     let lib_dir = if host.contains("apple-darwin") {
         run_direct_zig_tools(root, &cpp_root, &out_dir, zig_target, use_libstdcpp)
     } else {
-        match run_zig_build(root, &cpp_root, &out_dir, zig_target) {
+        match run_zig_build(
+            root,
+            &cpp_root,
+            &out_dir,
+            zig_target,
+            &libstdcpp_include_dirs,
+        ) {
             Ok(lib_dir) => lib_dir,
             Err(err) => panic!("zig build failed:\n{err}"),
         }

@@ -20,6 +20,7 @@ The output binary is **fully statically linked** (musl libc) with no runtime dep
 - [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024)
 - [Zig](https://ziglang.org/download/) ≥ 0.14
 - [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) — for cross-compilation
+- `g++` / libstdc++ headers — for Linux GNU host builds (`cargo build`)
 
 ```bash
 cargo install cargo-zigbuild

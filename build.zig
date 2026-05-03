@@ -30,8 +30,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const cpp_root = b.option([]const u8, "cpp-root", "C++ engine source root") orelse "_cpp_src";
+    const libstdcpp_includes = b.option([]const []const u8, "libstdcpp-include", "System libstdc++ include path") orelse &.{};
     const root_path = cppRootPath(b, cpp_root);
     const use_libstdcpp = target.result.os.tag == .linux and target.result.abi == .gnu;
+
+    if (use_libstdcpp and libstdcpp_includes.len == 0) {
+        @panic("linux-gnu builds require at least one -Dlibstdcpp-include=<path>");
+    }
 
     const root_module = b.createModule(.{
         .target = target,
@@ -43,19 +48,15 @@ pub fn build(b: *std.Build) void {
     root_module.addIncludePath(root_path.path(b, "src"));
     root_module.addIncludePath(root_path.path(b, "3rdparty/json/single_include"));
     root_module.addIncludePath(b.path("cpp_bridge"));
+    for (libstdcpp_includes) |include_path| {
+        root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    }
 
-    const libcxx_flags = &[_][]const u8{
+    const cpp_flags = &[_][]const u8{
         "-std=c++20",
         "-O2",
         "-fno-sanitize=all",
     };
-    const libstdcpp_flags = &[_][]const u8{
-        "-std=c++20",
-        "-O2",
-        "-fno-sanitize=all",
-        "-stdlib=libstdc++",
-    };
-    const cpp_flags = if (use_libstdcpp) libstdcpp_flags else libcxx_flags;
 
     root_module.addCSourceFiles(.{
         .root = root_path.path(b, "src"),

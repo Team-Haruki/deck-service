@@ -64,6 +64,7 @@ Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) 
 - `build.rs` resolves `DECK_CPP_SRC` / `_cpp_src` / sibling source paths, invokes Zig, and emits Cargo link metadata
 - C++ source location resolved in order: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - For musl targets, links `c++` and `c++abi` statically; macOS uses `c++`; Linux-gnu uses `stdc++`
+- Linux-gnu host builds discover system libstdc++ include paths from `c++ -v` and pass them into `build.zig`
 
 ## C++ Bridge (`cpp_bridge/`)
 

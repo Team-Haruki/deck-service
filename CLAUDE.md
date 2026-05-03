@@ -25,7 +25,7 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl
 DECK_DATA_DIR=./_cpp_src/data cargo run --release
 ```
 
-The C++ source location is resolved by `build.rs`: checks `DECK_CPP_SRC` env, then `_cpp_src/`, then sibling `sekai-deck-recommend-cpp/`.
+The C++ static library is built by `build.zig`. Cargo uses `build.rs` only to resolve the C++ source location (`DECK_CPP_SRC` env, then `_cpp_src/`, then sibling `sekai-deck-recommend-cpp/`), invoke Zig, and emit link metadata.
 
 ## Code Conventions
 

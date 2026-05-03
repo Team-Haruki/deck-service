@@ -9,7 +9,7 @@ deck-service is a Rust HTTP service (Axum) that wraps a C++ deck recommendation 
 ## Language & Toolchain
 
 - **Rust** (edition 2024) with Axum 0.8, Tokio, sonic-rs (not serde_json)
-- **C++20** compiled via `zig c++` (invoked from `build.rs` using the `cc` crate)
+- **C++20** compiled by `build.zig`; Cargo reaches it through a thin `build.rs`
 - **Zig** is used only as a C++ compiler toolchain, not as the project language
 - Cross-compilation: `cargo zigbuild --target x86_64-unknown-linux-musl`
 
@@ -60,7 +60,8 @@ Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) 
 
 ## Build System
 
-- `build.rs` compiles 27+ C++ source files + the C bridge using `cc::Build` with `zig c++`
+- `build.zig` compiles the C++ source list from `cpp_sources.txt` + the C bridge into `libdeck_recommend.a`
+- `build.rs` resolves `DECK_CPP_SRC` / `_cpp_src` / sibling source paths, invokes Zig, and emits Cargo link metadata
 - C++ source location resolved in order: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - For musl targets, links `c++` and `c++abi` statically; macOS uses `c++`; Linux-gnu uses `stdc++`
 

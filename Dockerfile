@@ -27,7 +27,7 @@ RUN git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src &
     cd _cpp_src && git submodule update --init --recursive
 
 # Copy project files
-COPY Cargo.toml Cargo.lock build.rs build.zig ./
+COPY Cargo.toml Cargo.lock build.rs build.zig cpp_sources.txt ./
 COPY .cargo .cargo
 COPY src/ src/
 COPY cpp_bridge/ cpp_bridge/

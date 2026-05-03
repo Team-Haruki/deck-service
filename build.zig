@@ -1,68 +1,68 @@
 const std = @import("std");
 
+fn cppRootPath(b: *std.Build, cpp_root: []const u8) std.Build.LazyPath {
+    if (std.fs.path.isAbsolute(cpp_root)) {
+        return .{ .cwd_relative = cpp_root };
+    }
+    return b.path(cpp_root);
+}
+
+fn loadCppSources(b: *std.Build) []const []const u8 {
+    const source_list_path = b.pathFromRoot("cpp_sources.txt");
+    const contents = std.fs.cwd().readFileAlloc(b.allocator, source_list_path, 64 * 1024) catch {
+        @panic("failed to read cpp_sources.txt");
+    };
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeAny(u8, contents, "\r\n");
+    while (lines.next()) |line| {
+        const source = std.mem.trim(u8, line, " \t");
+        if (source.len == 0 or source[0] == '#') {
+            continue;
+        }
+        sources.append(b.allocator, b.dupe(source)) catch @panic("OOM");
+    }
+
+    return sources.toOwnedSlice(b.allocator) catch @panic("OOM");
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const cpp_root = b.option([]const u8, "cpp-root", "C++ engine source root") orelse "_cpp_src";
+    const root_path = cppRootPath(b, cpp_root);
+    const use_libstdcpp = target.result.os.tag == .linux and target.result.abi == .gnu;
 
     const root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .link_libcpp = true,
+        .link_libcpp = !use_libstdcpp,
     });
 
-    // Include paths
-    root_module.addIncludePath(b.path("_cpp_src/src"));
-    root_module.addIncludePath(b.path("_cpp_src/3rdparty/json/single_include"));
+    root_module.addIncludePath(root_path.path(b, "src"));
+    root_module.addIncludePath(root_path.path(b, "3rdparty/json/single_include"));
     root_module.addIncludePath(b.path("cpp_bridge"));
 
-    // All C++ source files from _cpp_src/src (excluding the pybind11 wrapper)
-    const cpp_sources = &[_][]const u8{
-        "area-item-information/area-item-service.cpp",
-        "card-information/card-calculator.cpp",
-        "card-information/card-power-calculator.cpp",
-        "card-information/card-service.cpp",
-        "card-information/card-skill-calculator.cpp",
-        "card-priority/card-priority-filter.cpp",
-        "data-provider/data-provider.cpp",
-        "data-provider/master-data.cpp",
-        "data-provider/music-metas.cpp",
-        "data-provider/static-data.cpp",
-        "data-provider/user-data.cpp",
-        "deck-information/deck-calculator.cpp",
-        "deck-information/deck-service.cpp",
-        "deck-recommend/base-deck-recommend.cpp",
-        "deck-recommend/challenge-live-deck-recommend.cpp",
-        "deck-recommend/deck-result-update.cpp",
-        "deck-recommend/event-deck-recommend.cpp",
-        "deck-recommend/find-best-cards-dfs.cpp",
-        "deck-recommend/find-best-cards-ga.cpp",
-        "deck-recommend/find-best-cards-sa.cpp",
-        "deck-recommend/find-target-bonus-cards-dfs.cpp",
-        "deck-recommend/find-worldbloom-target-bonus-cards-dfs.cpp",
-        "deck-recommend/mysekai-deck-recommend.cpp",
-        "event-point/card-bloom-event-calculator.cpp",
-        "event-point/card-event-calculator.cpp",
-        "event-point/event-calculator.cpp",
-        "event-point/event-service.cpp",
-        "live-score/live-calculator.cpp",
-        "mysekai-information/mysekai-event-calculator.cpp",
-        "mysekai-information/mysekai-service.cpp",
-    };
-
-    const cpp_flags = &[_][]const u8{
+    const libcxx_flags = &[_][]const u8{
         "-std=c++20",
-        "-Wall",
-        "-Wextra",
+        "-O2",
+        "-fno-sanitize=all",
     };
+    const libstdcpp_flags = &[_][]const u8{
+        "-std=c++20",
+        "-O2",
+        "-fno-sanitize=all",
+        "-stdlib=libstdc++",
+    };
+    const cpp_flags = if (use_libstdcpp) libstdcpp_flags else libcxx_flags;
 
     root_module.addCSourceFiles(.{
-        .root = b.path("_cpp_src/src"),
-        .files = cpp_sources,
+        .root = root_path.path(b, "src"),
+        .files = loadCppSources(b),
         .flags = cpp_flags,
     });
 
-    // C bridge source
     root_module.addCSourceFiles(.{
         .root = b.path("cpp_bridge"),
         .files = &.{"deck_recommend_c.cpp"},

@@ -11,7 +11,7 @@ HTTP Request → Axum (Rust) → JSON FFI Bridge → C++ Engine → JSON Respons
 - **Rust + Axum** — async HTTP server with JSON request/response handling
 - **C FFI Bridge** (`cpp_bridge/`) — translates between Rust and the C++ engine via JSON strings
 - **C++ Engine** (`_cpp_src/`) — [sekai-deck-recommend-cpp](https://github.com/moe-sekai/sekai-deck-recommend-cpp), the core recommendation algorithms
-- **Zig** — builds the C++ bridge/engine archive through `build.zig`
+- **Zig** — builds the C++ bridge/engine archive for static/cross targets through `build.zig`
 
 The output binary is **fully statically linked** (musl libc) with no runtime dependencies, ideal for minimal container images.
 

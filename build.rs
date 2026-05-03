@@ -65,6 +65,14 @@ fn use_libstdcpp(rust_target: &str) -> bool {
     rust_target.contains("linux") && rust_target.contains("gnu")
 }
 
+fn is_native_linux_gnu(host: &str, target: &str) -> bool {
+    host == target && use_libstdcpp(target)
+}
+
+fn env_tool(var: &str, default: &str) -> String {
+    env::var(var).unwrap_or_else(|_| default.to_owned())
+}
+
 fn run_checked(command: &mut Command, description: &str) {
     let output = command
         .output()
@@ -287,8 +295,94 @@ fn run_direct_zig_tools(
     lib_dir
 }
 
+fn compile_native_cpp_object(
+    compiler: &str,
+    cpp_src: &Path,
+    json_include: &Path,
+    bridge_dir: &Path,
+    source: &Path,
+    object: &Path,
+) {
+    let mut command = Command::new(compiler);
+    command
+        .arg("-std=c++20")
+        .arg("-O2")
+        .arg("-fno-sanitize=all")
+        .arg("-I")
+        .arg(cpp_src)
+        .arg("-I")
+        .arg(json_include)
+        .arg("-I")
+        .arg(bridge_dir)
+        .arg("-c")
+        .arg(source)
+        .arg("-o")
+        .arg(object);
+
+    run_checked(&mut command, &format!("compile {}", source.display()));
+}
+
+fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf {
+    let cpp_compiler = env_tool("CXX", "c++");
+    let archiver = env_tool("AR", "ar");
+    let cpp_src = cpp_root.join("src");
+    let json_include = cpp_root.join("3rdparty/json/single_include");
+    let bridge_dir = root.join("cpp_bridge");
+    let sources = load_cpp_sources(root);
+    let native_dir = out_dir.join("native-cpp");
+    let obj_dir = native_dir.join("obj");
+    let lib_dir = native_dir.join("lib");
+
+    let _ = fs::remove_dir_all(&obj_dir);
+    fs::create_dir_all(&obj_dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", obj_dir.display()));
+    fs::create_dir_all(&lib_dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", lib_dir.display()));
+
+    let mut objects = Vec::with_capacity(sources.len() + 1);
+    for (index, source) in sources.iter().enumerate() {
+        let object = obj_dir.join(object_name(index, source));
+        compile_native_cpp_object(
+            &cpp_compiler,
+            &cpp_src,
+            &json_include,
+            &bridge_dir,
+            &cpp_src.join(source),
+            &object,
+        );
+        objects.push(object);
+    }
+
+    let bridge_object = obj_dir.join(object_name(sources.len(), BRIDGE_SOURCE));
+    compile_native_cpp_object(
+        &cpp_compiler,
+        &cpp_src,
+        &json_include,
+        &bridge_dir,
+        &bridge_dir.join(BRIDGE_SOURCE),
+        &bridge_object,
+    );
+    objects.push(bridge_object);
+
+    let lib_path = static_lib_path(&lib_dir);
+    let _ = fs::remove_file(&lib_path);
+
+    let mut archive = Command::new(&archiver);
+    archive.arg("cq").arg(&lib_path);
+    archive.args(objects.iter().map(PathBuf::as_path));
+    run_checked(&mut archive, "archive native C++ objects");
+
+    let mut index = Command::new(&archiver);
+    index.arg("s").arg(&lib_path);
+    run_checked(&mut index, "index native C++ archive");
+
+    lib_dir
+}
+
 fn emit_rerun_metadata(root: &Path, cpp_root: &Path) {
     println!("cargo:rerun-if-env-changed=DECK_CPP_SRC");
+    println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed=AR");
     println!(
         "cargo:rerun-if-changed={}",
         root.join("build.zig").display()
@@ -328,7 +422,8 @@ fn main() {
     let cpp_root = resolve_cpp_root(root);
     let zig_target = zig_target_for(&target);
     let use_libstdcpp = use_libstdcpp(&target);
-    let libstdcpp_include_dirs = if use_libstdcpp {
+    let native_linux_gnu = is_native_linux_gnu(&host, &target);
+    let libstdcpp_include_dirs = if use_libstdcpp && !native_linux_gnu {
         discover_libstdcpp_include_dirs()
     } else {
         Vec::new()
@@ -342,6 +437,8 @@ fn main() {
 
     let lib_dir = if host.contains("apple-darwin") {
         run_direct_zig_tools(root, &cpp_root, &out_dir, zig_target, use_libstdcpp)
+    } else if native_linux_gnu {
+        run_native_cpp_tools(root, &cpp_root, &out_dir)
     } else {
         match run_zig_build(
             root,

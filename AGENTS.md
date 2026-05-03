@@ -9,7 +9,7 @@ deck-service is a Rust HTTP service (Axum) that wraps a C++ deck recommendation 
 ## Language & Toolchain
 
 - **Rust** (edition 2024) with Axum 0.8, Tokio, sonic-rs (not serde_json)
-- **C++20** compiled by `build.zig`; Cargo reaches it through a thin `build.rs`
+- **C++20** compiled by `build.zig` for Zig targets; native Linux GNU uses system `c++`/`ar`
 - **Zig** is used only as a C++ compiler toolchain, not as the project language
 - Cross-compilation: `cargo zigbuild --target x86_64-unknown-linux-musl`
 
@@ -60,11 +60,11 @@ Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) 
 
 ## Build System
 
-- `build.zig` compiles the C++ source list from `cpp_sources.txt` + the C bridge into `libdeck_recommend.a`
+- `build.zig` compiles the C++ source list from `cpp_sources.txt` + the C bridge into `libdeck_recommend.a` for Zig-backed targets
 - `build.rs` resolves `DECK_CPP_SRC` / `_cpp_src` / sibling source paths, invokes Zig, and emits Cargo link metadata
 - C++ source location resolved in order: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - For musl targets, links `c++` and `c++abi` statically; macOS uses `c++`; Linux-gnu uses `stdc++`
-- Linux-gnu host builds discover system libstdc++ include paths from `c++ -v` and pass them into `build.zig`
+- Native Linux-gnu host builds use system `c++`/`ar` to avoid mixing system libstdc++ headers with Zig glibc headers
 
 ## C++ Bridge (`cpp_bridge/`)
 

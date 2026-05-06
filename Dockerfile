@@ -11,8 +11,11 @@ RUN case "$(uname -m)" in \
       aarch64) ZIG_ARCH=aarch64 ;; \
       *) echo "Unsupported arch: $(uname -m)" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" | \
-    tar -xJ -C /usr/local && \
+    curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 -fsSL \
+      -o /tmp/zig.tar.xz \
+      "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" && \
+    tar -xJf /tmp/zig.tar.xz -C /usr/local && \
+    rm -f /tmp/zig.tar.xz && \
     ln -s /usr/local/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
 
 RUN cargo install cargo-zigbuild && \

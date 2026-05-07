@@ -12,7 +12,7 @@ A Rust/Axum HTTP service wrapping a C++ Project Sekai deck recommendation engine
 
 ```bash
 # Clone C++ engine source (gitignored, required for build)
-git clone https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+git clone https://github.com/Team-Haruki/sekai-deck-recommend-cpp _cpp_src
 cd _cpp_src && git submodule update --init --recursive && cd ..
 
 # Native build
@@ -58,12 +58,10 @@ The `/cache_userdata` and batch `/recommend` endpoints accept `application/octet
 
 ## Git Commit Format
 
-All commits must follow:
+All commit subjects must follow:
 
 ```
 [Type] Short description starting with capital letter
-
-Co-Authored-By: <agent name and email>
 ```
 
 | Type | Usage |
@@ -74,34 +72,44 @@ Co-Authored-By: <agent name and email>
 | `[Docs]` | Documentation-only changes |
 
 Rules:
-- Description starts with a capital letter
-- Imperative mood (`Add ...`, not `Added ...`)
-- No trailing period
-- Keep subject <= ~70 chars
-- Always include a `Co-Authored-By` trailer identifying the AI agent
+- Description starts with a capital letter.
+- Use imperative mood: `Add ...`, not `Added ...`.
+- No trailing period.
+- Keep the subject at or below roughly 70 characters.
+- Agent attribution uses the standard Git `Co-authored-by:` trailer in the
+  commit body, not a free-form `Agent:` line.
+- The trailer must be on its own line, separated from the subject by a blank
+  line, in the form `Co-authored-by: <Display Name> <email>`.
+
+Suggested values per agent:
+
+- Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>`
+  (substitute the actual model, e.g. `Claude Sonnet 4.6`)
+- Codex: `Co-authored-by: Codex <noreply@openai.com>`
+- Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
 Examples:
 
 ```
 [Feat] Add batch recommend endpoint with zstd framing
-
-Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
 ```
-[Fix] Preload deck masterdata on startup
-
-Co-Authored-By: Claude <noreply@anthropic.com>
+[Fix] Preload music metas on startup
 ```
 
 ```
-[Chore] Migrate build system to cc crate
-
-Co-Authored-By: Claude <noreply@anthropic.com>
+[Chore] Update deck engine source ownership
 ```
 
 ```
-[Docs] Update AGENTS.md with concurrency model
+[Docs] Document full obfuscated release builds
+```
 
-Co-Authored-By: Claude <noreply@anthropic.com>
+Agent-authored commit example:
+
+```
+[Docs] Add agent commit guidelines
+
+Co-authored-by: Codex <noreply@openai.com>
 ```

@@ -6,8 +6,8 @@ on:
       - 'v*'
 
 env:
-  DECK_CPP_REPO: "https://github.com/Deseer/sekai-deck-recommend-cpp.git"
-  DECK_CPP_REF: "7d740ab331846d051f12bf8e32f651c8ac8506a7"
+  DECK_CPP_REPO: "https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git"
+  DECK_CPP_REF: "2f6aa08e884f94fc1dcbbbc65f0e4c8d075c09f7"
 
 jobs:
   build:

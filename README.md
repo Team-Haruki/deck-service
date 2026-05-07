@@ -10,7 +10,7 @@ HTTP Request → Axum (Rust) → JSON FFI Bridge → C++ Engine → JSON Respons
 
 - **Rust + Axum** — async HTTP server with JSON request/response handling
 - **C FFI Bridge** (`cpp_bridge/`) — translates between Rust and the C++ engine via JSON strings
-- **C++ Engine** (`_cpp_src/`) — [sekai-deck-recommend-cpp](https://github.com/moe-sekai/sekai-deck-recommend-cpp), the core recommendation algorithms
+- **C++ Engine** (`_cpp_src/`) — [sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp), the core recommendation algorithms
 - **Zig** — builds the C++ bridge/engine archive for static/cross targets through `build.zig`
 
 The output binary is **fully statically linked** (musl libc) with no runtime dependencies, ideal for minimal container images.
@@ -34,7 +34,7 @@ rustup target add x86_64-unknown-linux-musl
 The C++ source is gitignored. Clone it into `_cpp_src/`:
 
 ```bash
-git clone https://github.com/moe-sekai/sekai-deck-recommend-cpp _cpp_src
+git clone https://github.com/Team-Haruki/sekai-deck-recommend-cpp _cpp_src
 cd _cpp_src && git submodule update --init --recursive && cd ..
 ```
 
@@ -300,4 +300,4 @@ LGPL-2.1 — see [LICENSE](LICENSE).
 
 - [xfl03/sekai-calculator](https://github.com/xfl03/sekai-calculator) — original algorithms and implementation
 - [NeuraXmy/sekai-deck-recommend-cpp](https://github.com/NeuraXmy/sekai-deck-recommend-cpp) — C++ engine original implementation
-- [moe-sekai/sekai-deck-recommend-cpp](https://github.com/moe-sekai/sekai-deck-recommend-cpp) — current C++ engine maintaining
+- [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) — current C++ engine maintenance

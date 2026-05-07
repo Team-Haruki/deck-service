@@ -34,15 +34,34 @@ FFI boundary uses JSON strings. `DeckRecommend` handle is `Send` (not `Sync`), c
 
 ## Git Commit Format
 
+All commit subjects must follow:
+
 ```
 [Type] Short description starting with capital letter
-
-Co-Authored-By: <agent name and email>
 ```
 
 Types: `[Feat]` new feature, `[Fix]` bug fix, `[Chore]` maintenance/refactor/build, `[Docs]` documentation.
 
-Rules: capital letter start, imperative mood, no trailing period, <= ~70 chars, always include `Co-Authored-By` trailer.
+Rules: capital letter start, imperative mood, no trailing period, <= ~70 chars.
+Agent attribution uses a standard `Co-authored-by:` trailer in the commit body,
+separated from the subject by a blank line.
+
+Project examples:
+
+```
+[Feat] Add batch recommend endpoint with zstd framing
+[Fix] Preload music metas on startup
+[Chore] Update deck engine source ownership
+[Docs] Document full obfuscated release builds
+```
+
+Agent-authored commit example:
+
+```
+[Docs] Add agent commit guidelines
+
+Co-authored-by: Codex <noreply@openai.com>
+```
 
 ## Key Files
 

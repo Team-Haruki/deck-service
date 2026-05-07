@@ -29,7 +29,7 @@ jobs:
 
       - name: Clone C++ engine source
         run: |
-          git clone "${DECK_CPP_REPO}" _cpp_src
+          git clone --branch master --single-branch "${DECK_CPP_REPO}" _cpp_src
           cd _cpp_src
           git checkout "${DECK_CPP_REF}"
           git submodule update --init --recursive

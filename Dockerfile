@@ -25,7 +25,7 @@ WORKDIR /build
 
 # Clone C++ engine source
 ARG DECK_CPP_REPO=https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
-ARG DECK_CPP_REF=2f6aa08e884f94fc1dcbbbc65f0e4c8d075c09f7
+ARG DECK_CPP_REF=0fe6c6fe0ebb4adfebc9b968a9fae2c6c9cb1e63
 RUN git clone --branch master --single-branch "${DECK_CPP_REPO}" _cpp_src && \
     cd _cpp_src && \
     git checkout "${DECK_CPP_REF}" && \

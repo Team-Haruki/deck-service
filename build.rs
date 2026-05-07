@@ -239,6 +239,7 @@ fn run_direct_zig_tools(
     zig_target: &str,
     use_libstdcpp: bool,
 ) -> PathBuf {
+    let archiver = env_tool("AR", "ar");
     let cpp_src = cpp_root.join("src");
     let json_include = cpp_root.join("3rdparty/json/single_include");
     let bridge_dir = root.join("cpp_bridge");
@@ -283,14 +284,14 @@ fn run_direct_zig_tools(
     let lib_path = static_lib_path(&lib_dir);
     let _ = fs::remove_file(&lib_path);
 
-    let mut archive = Command::new("zig");
-    archive.arg("ar").arg("cq").arg(&lib_path);
+    let mut archive = Command::new(&archiver);
+    archive.arg("cq").arg(&lib_path);
     archive.args(objects.iter().map(PathBuf::as_path));
-    run_checked(&mut archive, "archive C++ objects");
+    run_checked(&mut archive, "archive direct C++ objects");
 
-    let mut index = Command::new("zig");
-    index.arg("ar").arg("s").arg(&lib_path);
-    run_checked(&mut index, "index C++ archive");
+    let mut index = Command::new(&archiver);
+    index.arg("s").arg(&lib_path);
+    run_checked(&mut index, "index direct C++ archive");
 
     lib_dir
 }

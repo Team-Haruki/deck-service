@@ -27,7 +27,6 @@ on:
   workflow_dispatch:
 
 env:
-  ZIG_VERSION: "0.15.2"
   DECK_CPP_REPO: "https://github.com/Deseer/sekai-deck-recommend-cpp.git"
   DECK_CPP_REF: "master"
 
@@ -47,13 +46,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Zig
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
-            sudo tar -xJ -C /usr/local
-          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: true
+          cache-key: rust-ci-build
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -83,16 +81,17 @@ jobs:
           git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src
           cd _cpp_src && git submodule update --init --recursive
 
-      - name: Install Zig
-        run: |
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | \
-            sudo tar -xJ -C /usr/local
-          sudo ln -sf /usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: true
+          cache-key: rust-ci-cross
 
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild

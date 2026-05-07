@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+env:
+  DECK_CPP_REPO: "https://github.com/Deseer/sekai-deck-recommend-cpp.git"
+  DECK_CPP_REF: "master"
+
 jobs:
   docker:
     runs-on: ubuntu-latest
@@ -14,6 +18,34 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Clone C++ engine source
+        run: |
+          git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src
+          cd _cpp_src && git submodule update --init --recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: true
+          cache-key: docker-amd64
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          prefix-key: "v4-docker"
 
       - name: Get version
         id: version
@@ -49,6 +81,18 @@ jobs:
           path.write_text(updated)
           PY
 
+      - name: Build static binary
+        run: |
+          cargo zigbuild --release --target x86_64-unknown-linux-musl
+
+      - name: Prepare runtime image context
+        run: |
+          rm -rf out/docker-image
+          mkdir -p out/docker-image
+          cp target/x86_64-unknown-linux-musl/release/deck-service out/docker-image/deck-service
+          cp -R _cpp_src/data out/docker-image/data
+          cp Dockerfile.runtime out/docker-image/Dockerfile
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -61,10 +105,7 @@ jobs:
           IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')
           VERSION=${{ steps.version.outputs.tag }}
           docker build \
-            --build-arg VERSION="$VERSION" \
-            --build-arg GIT_SHA="${GITHUB_SHA}" \
-            --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest .
+            -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest out/docker-image
 
       - name: Push Docker image
         run: |

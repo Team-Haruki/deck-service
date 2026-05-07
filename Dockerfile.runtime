@@ -1,0 +1,11 @@
+FROM scratch
+
+COPY deck-service /deck-service
+COPY data /data
+
+ENV DECK_DATA_DIR=/data
+ENV BIND_ADDR=0.0.0.0:3000
+
+EXPOSE 3000
+
+ENTRYPOINT ["/deck-service"]

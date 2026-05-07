@@ -217,6 +217,49 @@ impl DeckRecommend {
     ) -> Result<crate::models::DeckRecommendResult, String> {
         self.recommend_value(options)
     }
+
+    pub fn calculate_raw(&self, options_json: &str) -> Result<String, String> {
+        let started = Instant::now();
+        tracing::debug!(options_bytes = options_json.len(), "ffi calculate start");
+        let c_opts = ffi::to_cstring(options_json);
+        let mut error_out: *const std::os::raw::c_char = std::ptr::null();
+
+        let result_ptr =
+            unsafe { ffi::deck_recommend_calculate(self.handle, c_opts.as_ptr(), &mut error_out) };
+
+        if result_ptr.is_null() {
+            if !error_out.is_null() {
+                let msg = unsafe { CStr::from_ptr(error_out) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { ffi::deck_recommend_free_string(error_out) };
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    error = %msg,
+                    "ffi calculate returned error"
+                );
+                return Err(msg);
+            }
+            return Err("Unknown error during calculation".into());
+        }
+
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { ffi::deck_recommend_free_string(result_ptr) };
+        tracing::debug!(
+            result_bytes = result.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "ffi calculate completed"
+        );
+        Ok(result)
+    }
+
+    pub fn calculate_value<T: Serialize>(&self, options: &T) -> Result<sonic_rs::Value, String> {
+        let json_str = sonic_rs::to_string(options).map_err(|e| e.to_string())?;
+        let result_str = self.calculate_raw(&json_str)?;
+        sonic_rs::from_str(&result_str).map_err(|e| e.to_string())
+    }
 }
 
 impl Drop for DeckRecommend {

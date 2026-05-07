@@ -10,8 +10,12 @@
 #include "data-provider/data-provider.h"
 #include "common/enum-maps.h"
 #include "common/collection-utils.h"
+#include "card-information/card-calculator.h"
 #include "deck-recommend/base-deck-recommend.h"
 #include "deck-recommend/deck-result-update.h"
+#include "deck-information/deck-calculator.h"
+#include "deck-information/deck-service.h"
+#include "live-score/live-calculator.h"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -79,6 +83,110 @@ static std::string normalize_masterdata_key(std::string key) {
         key.resize(key.size() - 5);
     }
     return key;
+}
+
+static std::string require_string_field(const json& opts, const std::string& key) {
+    if (!opts.contains(key) || !opts[key].is_string())
+        throw std::invalid_argument(key + " is required.");
+    return opts[key].get<std::string>();
+}
+
+static int require_int_field(const json& opts, const std::string& key) {
+    if (!opts.contains(key) || !opts[key].is_number_integer())
+        throw std::invalid_argument(key + " is required.");
+    return opts[key].get<int>();
+}
+
+static bool has_int_field(const json& opts, const std::string& key) {
+    return opts.contains(key) && !opts[key].is_null() && opts[key].is_number_integer();
+}
+
+static json deck_power_to_json(const DeckPowerDetail& power) {
+    json j;
+    j["base"] = power.base;
+    j["areaItemBonus"] = power.areaItemBonus;
+    j["characterBonus"] = power.characterBonus;
+    j["honorBonus"] = power.honorBonus;
+    j["fixtureBonus"] = power.fixtureBonus;
+    j["gateBonus"] = power.gateBonus;
+    j["total"] = power.total;
+    return j;
+}
+
+static json deck_card_power_to_json(const DeckCardPowerDetail& power) {
+    json j;
+    j["base"] = power.base;
+    j["areaItemBonus"] = power.areaItemBonus;
+    j["characterBonus"] = power.characterBonus;
+    j["fixtureBonus"] = power.fixtureBonus;
+    j["gateBonus"] = power.gateBonus;
+    j["total"] = power.total;
+    return j;
+}
+
+static json deck_card_skill_to_json(const DeckCardSkillDetail& skill) {
+    json j;
+    j["scoreUp"] = skill.scoreUp;
+    j["lifeRecovery"] = skill.lifeRecovery;
+    return j;
+}
+
+static json deck_detail_to_json(const DeckDetail& deckDetail) {
+    json j;
+    j["power"] = deck_power_to_json(deckDetail.power);
+    if (deckDetail.eventBonus.has_value())
+        j["eventBonus"] = deckDetail.eventBonus.value();
+    if (deckDetail.supportDeckBonus.has_value())
+        j["supportDeckBonus"] = deckDetail.supportDeckBonus.value();
+
+    json cards = json::array();
+    for (const auto& card : deckDetail.cards) {
+        json cj;
+        cj["cardId"] = card.cardId;
+        cj["level"] = card.level;
+        cj["skillLevel"] = card.skillLevel;
+        cj["masterRank"] = card.masterRank;
+        cj["power"] = deck_card_power_to_json(card.power);
+        cj["skill"] = deck_card_skill_to_json(card.skill);
+        cards.push_back(cj);
+    }
+    j["cards"] = cards;
+    return j;
+}
+
+static json live_detail_to_json(const LiveDetail& liveDetail) {
+    json j;
+    j["score"] = liveDetail.score;
+    j["time"] = liveDetail.time;
+    j["life"] = liveDetail.life;
+    j["tap"] = liveDetail.tap;
+    if (liveDetail.deck.has_value())
+        j["deck"] = deck_detail_to_json(liveDetail.deck.value());
+    return j;
+}
+
+static std::optional<std::vector<LiveSkill>> parse_live_skills(const json& opts) {
+    if (!opts.contains("skills") || opts["skills"].is_null())
+        return std::nullopt;
+    if (!opts["skills"].is_array())
+        throw std::invalid_argument("skills must be an array.");
+
+    std::vector<LiveSkill> liveSkills{};
+    for (const auto& item : opts["skills"]) {
+        if (!item.is_object())
+            throw std::invalid_argument("skills entries must be objects.");
+        LiveSkill liveSkill{};
+        if (item.contains("seq") && item["seq"].is_number_integer())
+            liveSkill.seq = item["seq"].get<int>();
+        if (item.contains("cardId") && item["cardId"].is_number_integer())
+            liveSkill.cardId = item["cardId"].get<int>();
+        else if (item.contains("card_id") && item["card_id"].is_number_integer())
+            liveSkill.cardId = item["card_id"].get<int>();
+        else
+            throw std::invalid_argument("skills entries require cardId.");
+        liveSkills.push_back(liveSkill);
+    }
+    return liveSkills;
 }
 
 // ---- region map ----
@@ -158,6 +266,90 @@ class SekaiDeckRecommendC {
         );
     }
 
+    DataProvider build_data_provider(const json& opts, bool require_musicmetas) {
+        if (!opts.contains("region") || !opts["region"].is_string())
+            throw std::invalid_argument("region is required.");
+        std::string region_str = opts["region"];
+        if (!REGION_MAP.count(region_str))
+            throw std::invalid_argument("Invalid region: " + region_str);
+        Region region = REGION_MAP.at(region_str);
+
+        auto userdata = resolve_userdata(opts);
+
+        if (!region_masterdata.count(region))
+            throw std::invalid_argument("Master data not found for region: " + region_str);
+        if (require_musicmetas && !region_musicmetas.count(region))
+            throw std::invalid_argument("Music metas not found for region: " + region_str);
+
+        auto masterdata = region_masterdata[region];
+        auto musicmetas = region_musicmetas.count(region)
+            ? region_musicmetas[region]
+            : std::make_shared<MusicMetas>();
+        return DataProvider{region, masterdata, userdata, musicmetas};
+    }
+
+    std::vector<UserCard> resolve_fixed_deck_cards(DataProvider& dp, const json& opts, const std::string& mode) {
+        DeckService deckService(dp);
+        if (mode == "challenge") {
+            auto challengeDeck = deckService.getChallengeLiveSoloDeck(require_int_field(opts, "character_id"));
+            return deckService.getChallengeLiveSoloDeckCards(challengeDeck);
+        }
+
+        if (mode == "deck") {
+            auto userDeck = deckService.getDeck(require_int_field(opts, "deck_id"));
+            return deckService.getDeckCards(userDeck);
+        }
+
+        if (mode == "live_full") {
+            if (has_int_field(opts, "character_id")) {
+                auto challengeDeck = deckService.getChallengeLiveSoloDeck(opts["character_id"].get<int>());
+                return deckService.getChallengeLiveSoloDeckCards(challengeDeck);
+            }
+            if (has_int_field(opts, "deck_id")) {
+                auto userDeck = deckService.getDeck(opts["deck_id"].get<int>());
+                return deckService.getDeckCards(userDeck);
+            }
+            throw std::invalid_argument("Either deck_id or character_id is required.");
+        }
+
+        throw std::invalid_argument("Invalid calculate mode: " + mode);
+    }
+
+    DeckDetail calculate_fixed_deck_detail(DataProvider& dp, const std::vector<UserCard>& deckCards) {
+        if (deckCards.empty())
+            throw std::invalid_argument("fixed deck contains no cards.");
+
+        dp.init();
+
+        CardCalculator cardCalculator(dp);
+        DeckCalculator deckCalculator(dp);
+        std::unordered_map<int, CardConfig> config{};
+        std::unordered_map<int, CardConfig> singleCardConfig{};
+        auto cardDetails = cardCalculator.batchGetCardDetail(deckCards, config, singleCardConfig);
+        if (cardDetails.size() != deckCards.size())
+            throw std::runtime_error("Failed to calculate all cards in fixed deck.");
+
+        std::vector<const CardDetail*> cardDetailPtrs{};
+        cardDetailPtrs.reserve(cardDetails.size());
+        for (const auto& cardDetail : cardDetails)
+            cardDetailPtrs.push_back(&cardDetail);
+
+        std::map<int, std::vector<SupportDeckCard>> supportCards{};
+        auto deckDetails = deckCalculator.getDeckDetailByCards(
+            cardDetailPtrs,
+            supportCards,
+            deckCalculator.getHonorBonusPower(),
+            std::nullopt,
+            std::nullopt,
+            SkillReferenceChooseStrategy::Max,
+            false,
+            false
+        );
+        if (deckDetails.empty())
+            throw std::runtime_error("Failed to calculate fixed deck detail.");
+        return deckDetails.front();
+    }
+
 public:
     void update_masterdata(const std::string& base_dir, const std::string& region_str) {
         if (!REGION_MAP.count(region_str))
@@ -209,6 +401,55 @@ public:
         auto userdata_hash = hash_userdata_payload(userdata_str);
         remember_userdata(userdata_hash, userdata);
         return userdata_hash;
+    }
+
+    json calculate(const json& opts) {
+        auto mode = require_string_field(opts, "mode");
+        auto dp = build_data_provider(opts, mode == "live_full");
+        auto deckCards = resolve_fixed_deck_cards(dp, opts, mode);
+        auto deckDetail = calculate_fixed_deck_detail(dp, deckCards);
+
+        if (mode == "deck" || mode == "challenge") {
+            json result;
+            result["totalPower"] = deckDetail.power.total;
+            result["detail"] = deck_detail_to_json(deckDetail);
+            return result;
+        }
+
+        if (mode != "live_full")
+            throw std::invalid_argument("Invalid calculate mode: " + mode);
+
+        auto musicId = require_int_field(opts, "music_id");
+        auto difficulty = require_string_field(opts, "difficulty");
+        if (!VALID_MUSIC_DIFFS.count(difficulty))
+            throw std::invalid_argument("Invalid music difficulty: " + difficulty);
+
+        LiveCalculator liveCalculator(dp);
+        auto musicMeta = liveCalculator.getMusicMeta(
+            musicId,
+            mapEnum(EnumMap::musicDifficulty, difficulty)
+        );
+        auto liveSkills = parse_live_skills(opts);
+        std::optional<std::vector<DeckCardSkillDetail>> skillDetails = std::nullopt;
+        if (liveSkills.has_value())
+            skillDetails = liveCalculator.getSoloLiveSkill(liveSkills.value(), deckDetail.cards);
+
+        auto liveDetail = liveCalculator.getLiveDetailByDeck(
+            deckDetail,
+            musicMeta,
+            mapEnum(EnumMap::liveType, "solo"),
+            LiveSkillOrder::best,
+            std::nullopt,
+            skillDetails
+        );
+        liveDetail.deck = deckDetail;
+
+        json result;
+        result["totalPower"] = deckDetail.power.total;
+        result["liveScore"] = liveDetail.score;
+        result["deckDetail"] = deck_detail_to_json(deckDetail);
+        result["liveDetail"] = live_detail_to_json(liveDetail);
+        return result;
     }
 
     json recommend(const json& opts) {
@@ -606,6 +847,10 @@ public:
                 cj["card_id"] = card.cardId;
                 cj["total_power"] = card.power.total;
                 cj["base_power"] = card.power.base;
+                cj["area_item_bonus_power"] = card.power.areaItemBonus;
+                cj["character_bonus_power"] = card.power.characterBonus;
+                cj["fixture_bonus_power"] = card.power.fixtureBonus;
+                cj["gate_bonus_power"] = card.power.gateBonus;
                 cj["event_bonus_rate"] = card.eventBonus.value_or(0);
                 cj["master_rank"] = card.masterRank;
                 cj["level"] = card.level;
@@ -711,6 +956,18 @@ const char* deck_recommend_recommend(DeckRecommendHandle handle, const char* opt
     try {
         auto opts = json::parse(options_json);
         auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend(opts);
+        std::string s = result.dump();
+        return alloc_cstr(s);
+    } catch (const std::exception& e) {
+        if (error_out) *error_out = alloc_error(e.what());
+        return nullptr;
+    }
+}
+
+const char* deck_recommend_calculate(DeckRecommendHandle handle, const char* options_json, const char** error_out) {
+    try {
+        auto opts = json::parse(options_json);
+        auto result = static_cast<SekaiDeckRecommendC*>(handle)->calculate(opts);
         std::string s = result.dump();
         return alloc_cstr(s);
     } catch (const std::exception& e) {

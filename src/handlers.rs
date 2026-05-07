@@ -7,14 +7,15 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
+use serde::de::DeserializeOwned;
 use sonic_rs::{JsonValueTrait, json};
 
 use crate::error::AppError;
 use crate::masterdata::resolve_masterdata_base_dir;
 use crate::models::{
-    BatchRecommendRequest, BatchRecommendResponseItem, CacheUserdataResponse, DeckRecommendOptions,
-    DeckRecommendResult, UpdateMasterdataFromJsonRequest, UpdateMasterdataRequest,
-    UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest,
+    BatchRecommendRequest, BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions,
+    DeckRecommendOptions, DeckRecommendResult, UpdateMasterdataFromJsonRequest,
+    UpdateMasterdataRequest, UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest,
 };
 use crate::state::{AppState, EngineLease};
 
@@ -72,6 +73,14 @@ pub async fn cache_userdata(
     );
 
     Ok(Json(CacheUserdataResponse { userdata_hash }).into_response())
+}
+
+pub async fn calculate(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<sonic_rs::Value>, AppError> {
+    let options = parse_json_body::<CalculateOptions>(&body, "calculate")?;
+    calculate_with_options(state, options, "calculate").await
 }
 
 pub async fn recommend(
@@ -225,6 +234,14 @@ pub async fn update_musicmetas_from_string(
         "Request completed"
     );
     Ok(Json(json!({ "status": "ok" })))
+}
+
+fn parse_json_body<T>(body: &Bytes, name: &str) -> Result<T, AppError>
+where
+    T: DeserializeOwned,
+{
+    sonic_rs::from_slice(body.as_ref())
+        .map_err(|e| AppError::BadRequest(format!("invalid {name} payload: {e}")))
 }
 
 async fn recommend_legacy(
@@ -453,6 +470,40 @@ async fn recommend_batch(
     );
 
     Ok(Json(results).into_response())
+}
+
+async fn calculate_with_options(
+    state: Arc<AppState>,
+    options: CalculateOptions,
+    op_name: &'static str,
+) -> Result<Json<sonic_rs::Value>, AppError> {
+    let op_id = state.next_op_id();
+    let request_started = Instant::now();
+    tracing::info!(
+        op_id,
+        op = op_name,
+        region = %options.region,
+        mode = %options.mode,
+        music_id = options.music_id.unwrap_or_default(),
+        difficulty = options.difficulty.as_deref().unwrap_or(""),
+        deck_id = options.deck_id.unwrap_or_default(),
+        character_id = options.character_id.unwrap_or_default(),
+        "Calculation request parsed"
+    );
+
+    let result = tokio::task::block_in_place(|| {
+        run_engine_op(state.as_ref(), op_id, op_name, |engine| {
+            engine.calculate_value(&options)
+        })
+    })?;
+
+    tracing::info!(
+        op_id,
+        op = op_name,
+        elapsed_ms = elapsed_ms(request_started.elapsed()),
+        "Calculation request completed"
+    );
+    Ok(Json(result))
 }
 
 fn request_content_type(headers: &HeaderMap) -> String {

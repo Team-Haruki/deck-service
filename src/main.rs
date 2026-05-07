@@ -1,4 +1,5 @@
 use std::env;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +54,7 @@ async fn main() {
     });
 
     preload_masterdata(state.as_ref());
+    preload_musicmetas(state.as_ref());
 
     tracing::info!(
         lock_warn_ms = lock_warn_threshold.as_millis() as u64,
@@ -67,6 +69,7 @@ async fn main() {
         .route("/health", get(handlers::health))
         .route("/cache_userdata", post(handlers::cache_userdata))
         .route("/recommend", post(handlers::recommend))
+        .route("/calculate", post(handlers::calculate))
         .route("/update/masterdata", post(handlers::update_masterdata))
         .route(
             "/update/masterdata/json",
@@ -183,6 +186,18 @@ fn preload_masterdata(state: &AppState) {
             );
             continue;
         }
+        if !Path::new(&resolved_base_dir)
+            .join("areaItemLevels.json")
+            .is_file()
+        {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                resolved_base_dir = %resolved_base_dir,
+                "Skipping masterdata preload because the directory does not contain masterdata files"
+            );
+            continue;
+        }
 
         tracing::info!(
             region = %region,
@@ -231,6 +246,120 @@ fn preload_masterdata(state: &AppState) {
             engine_count = engines.len(),
             "Preloaded deck-service masterdata"
         );
+    }
+}
+
+fn preload_musicmetas(state: &AppState) {
+    let requested_base_dir = env::var("DECK_MUSICMETAS_DIR")
+        .or_else(|_| env::var("DECK_MUSICMETAS_BASE_DIR"))
+        .or_else(|_| env::var("DECK_MASTERDATA_DIR"))
+        .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
+        .unwrap_or_else(|_| "/app/data".into());
+    let regions = env_csv("DECK_MUSICMETAS_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
+
+    for region in regions {
+        let env_file_name = format!("DECK_MUSICMETAS_FILE_{}", region.to_ascii_uppercase());
+        let resolved_file_path = env::var(&env_file_name)
+            .unwrap_or_else(|_| resolve_musicmetas_file_path(&requested_base_dir, &region));
+        if resolved_file_path.trim().is_empty() {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                "Skipping music metas preload because no file was resolved"
+            );
+            continue;
+        }
+
+        if !Path::new(&resolved_file_path).is_file() {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                resolved_file_path = %resolved_file_path,
+                "Skipping music metas preload because the file does not exist"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            region = %region,
+            requested_base_dir = %requested_base_dir,
+            resolved_file_path = %resolved_file_path,
+            "Preloading deck-service music metas"
+        );
+
+        let engines = match state.engines.checkout_all(state.debug.lock_timeout) {
+            Ok(engines) => engines,
+            Err(err) => {
+                tracing::error!(
+                    region = %region,
+                    requested_base_dir = %requested_base_dir,
+                    resolved_file_path = %resolved_file_path,
+                    error = %err.timeout_message(),
+                    "Failed to lock engine pool for music metas preload"
+                );
+                continue;
+            }
+        };
+
+        let mut failed = false;
+        for engine in engines.iter() {
+            if let Err(err) = engine.update_musicmetas(&resolved_file_path, &region) {
+                failed = true;
+                tracing::error!(
+                    region = %region,
+                    resolved_file_path = %resolved_file_path,
+                    error = %err,
+                    "Failed to preload deck-service music metas"
+                );
+                break;
+            }
+        }
+
+        if failed {
+            continue;
+        }
+
+        tracing::info!(
+            region = %region,
+            resolved_file_path = %resolved_file_path,
+            engine_count = engines.len(),
+            "Preloaded deck-service music metas"
+        );
+    }
+}
+
+fn resolve_musicmetas_file_path(base_dir: &str, region: &str) -> String {
+    let trimmed = base_dir.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let base_path = Path::new(trimmed);
+    if base_path.is_file() {
+        return trimmed.to_string();
+    }
+
+    let filename = musicmetas_filename(region);
+    let candidates = [
+        base_path.join(filename),
+        base_path.join("data").join(filename),
+    ];
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+
+    candidates[0].to_string_lossy().into_owned()
+}
+
+fn musicmetas_filename(region: &str) -> &'static str {
+    match region {
+        "cn" => "music_metas-cn.json",
+        "tw" => "music_metas-tc.json",
+        "en" => "music_metas-en.json",
+        "kr" => "music_metas-kr.json",
+        _ => "music_metas.json",
     }
 }
 

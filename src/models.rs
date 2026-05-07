@@ -169,6 +169,23 @@ pub struct DeckRecommendOptions {
     pub ga_options: Option<GaOptions>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CalculateOptions {
+    pub mode: String,
+    pub region: String,
+    pub user_data_str: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub music_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deck_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Value>,
+}
+
 // ---- Response types ----
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,6 +193,10 @@ pub struct RecommendCard {
     pub card_id: i32,
     pub total_power: i32,
     pub base_power: i32,
+    pub area_item_bonus_power: i32,
+    pub character_bonus_power: i32,
+    pub fixture_bonus_power: i32,
+    pub gate_bonus_power: i32,
     pub event_bonus_rate: f64,
     pub master_rank: i32,
     pub level: i32,

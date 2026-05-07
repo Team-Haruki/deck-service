@@ -37,6 +37,11 @@ unsafe extern "C" {
         options_json: *const c_char,
         error_out: *mut *const c_char,
     ) -> *const c_char;
+    pub fn deck_recommend_calculate(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        error_out: *mut *const c_char,
+    ) -> *const c_char;
     pub fn deck_recommend_free_string(str_ptr: *const c_char);
 }
 

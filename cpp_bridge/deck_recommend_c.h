@@ -44,6 +44,12 @@ const char* deck_recommend_cache_userdata(DeckRecommendHandle handle, const char
 // If error occurs, *error_out is set to an error message (caller must free).
 const char* deck_recommend_recommend(DeckRecommendHandle handle, const char* options_json, const char** error_out);
 
+// Run fixed-deck calculations. options_json is the full options as a JSON string.
+// Supported modes: "deck", "challenge", "live_full".
+// Returns a JSON string with the result (caller must free), or NULL on failure.
+// If error occurs, *error_out is set to an error message (caller must free).
+const char* deck_recommend_calculate(DeckRecommendHandle handle, const char* options_json, const char** error_out);
+
 // Free a string returned by any of the above functions
 void deck_recommend_free_string(const char* str);
 

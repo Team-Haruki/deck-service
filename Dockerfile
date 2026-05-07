@@ -25,9 +25,11 @@ WORKDIR /build
 
 # Clone C++ engine source
 ARG DECK_CPP_REPO=https://github.com/Deseer/sekai-deck-recommend-cpp.git
-ARG DECK_CPP_REF=master
-RUN git clone --depth 1 --branch "${DECK_CPP_REF}" "${DECK_CPP_REPO}" _cpp_src && \
-    cd _cpp_src && git submodule update --init --recursive
+ARG DECK_CPP_REF=7d740ab58c1326457f1e6ef0d0114239c345cff2
+RUN git clone "${DECK_CPP_REPO}" _cpp_src && \
+    cd _cpp_src && \
+    git checkout "${DECK_CPP_REF}" && \
+    git submodule update --init --recursive
 
 # Copy project files
 COPY Cargo.toml Cargo.lock build.rs build.zig cpp_sources.txt ./

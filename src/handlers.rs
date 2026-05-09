@@ -134,7 +134,7 @@ pub async fn update_masterdata(
         );
     }
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_masterdata", true, |engine| {
+        run_engine_exclusive_op(state.as_ref(), op_id, "update_masterdata", true, |engine| {
             engine.update_masterdata(&resolved_base_dir, &req.region)
         })
     })?;
@@ -161,7 +161,7 @@ pub async fn update_masterdata_from_json(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(
+        run_engine_exclusive_op(
             state.as_ref(),
             op_id,
             "update_masterdata_from_json",
@@ -192,7 +192,7 @@ pub async fn update_musicmetas(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(state.as_ref(), op_id, "update_musicmetas", true, |engine| {
+        run_engine_exclusive_op(state.as_ref(), op_id, "update_musicmetas", true, |engine| {
             engine.update_musicmetas(&req.file_path, &req.region)
         })
     })?;
@@ -219,7 +219,7 @@ pub async fn update_musicmetas_from_string(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_broadcast_op(
+        run_engine_exclusive_op(
             state.as_ref(),
             op_id,
             "update_musicmetas_from_string",
@@ -757,17 +757,17 @@ where
     })
 }
 
-fn run_engine_broadcast_op<T, F>(
+fn run_engine_exclusive_op<T, F>(
     state: &AppState,
     op_id: u64,
     op_name: &'static str,
     clear_userdata_cache_on_success: bool,
-    mut f: F,
-) -> Result<Vec<T>, AppError>
+    f: F,
+) -> Result<T, AppError>
 where
-    F: FnMut(&crate::bridge::DeckRecommend) -> Result<T, String>,
+    F: FnOnce(&crate::bridge::DeckRecommend) -> Result<T, String>,
 {
-    let span = tracing::debug_span!("engine_broadcast_op", op_id, op = op_name);
+    let span = tracing::debug_span!("engine_exclusive_op", op_id, op = op_name);
     let _entered = span.enter();
 
     let lock_started = Instant::now();
@@ -801,18 +801,19 @@ where
     }
 
     let engine_started = Instant::now();
-    tracing::debug!("Starting broadcast engine operation");
-    let mut results = Vec::with_capacity(engines.len());
-    for engine in engines.iter() {
-        results.push(f(engine).map_err(AppError::Engine)?);
-    }
+    tracing::debug!("Starting exclusive engine operation");
+    let engine = engines
+        .iter()
+        .next()
+        .ok_or_else(|| AppError::Engine("engine pool is empty".into()))?;
+    let result = f(engine).map_err(AppError::Engine)?;
     if clear_userdata_cache_on_success {
         engines.clear_userdata_hashes();
         state.userdata_cache.clear();
         tracing::info!(
             op_id,
             op = op_name,
-            "Cleared cached userdata state after broadcast engine update"
+            "Cleared cached userdata state after exclusive engine update"
         );
     }
     let engine_elapsed = engine_started.elapsed();
@@ -821,16 +822,16 @@ where
         tracing::warn!(
             engine_elapsed_ms = elapsed_ms(engine_elapsed),
             threshold_ms = elapsed_ms(state.debug.engine_warn_threshold),
-            "Broadcast engine operation exceeded threshold"
+            "Exclusive engine operation exceeded threshold"
         );
     } else {
         tracing::debug!(
             engine_elapsed_ms = elapsed_ms(engine_elapsed),
-            "Broadcast engine operation completed"
+            "Exclusive engine operation completed"
         );
     }
 
-    Ok(results)
+    Ok(result)
 }
 fn elapsed_ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0

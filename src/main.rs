@@ -220,21 +220,20 @@ fn preload_masterdata(state: &AppState) {
             }
         };
 
-        let mut failed = false;
-        for engine in engines.iter() {
-            if let Err(err) = engine.update_masterdata(&resolved_base_dir, &region) {
-                failed = true;
-                tracing::error!(
-                    region = %region,
-                    resolved_base_dir = %resolved_base_dir,
-                    error = %err,
-                    "Failed to preload deck-service masterdata"
-                );
-                break;
-            }
-        }
-
-        if failed {
+        let Some(engine) = engines.iter().next() else {
+            tracing::error!(
+                region = %region,
+                "Engine pool is empty; cannot preload masterdata"
+            );
+            continue;
+        };
+        if let Err(err) = engine.update_masterdata(&resolved_base_dir, &region) {
+            tracing::error!(
+                region = %region,
+                resolved_base_dir = %resolved_base_dir,
+                error = %err,
+                "Failed to preload deck-service masterdata"
+            );
             continue;
         }
 
@@ -301,21 +300,20 @@ fn preload_musicmetas(state: &AppState) {
             }
         };
 
-        let mut failed = false;
-        for engine in engines.iter() {
-            if let Err(err) = engine.update_musicmetas(&resolved_file_path, &region) {
-                failed = true;
-                tracing::error!(
-                    region = %region,
-                    resolved_file_path = %resolved_file_path,
-                    error = %err,
-                    "Failed to preload deck-service music metas"
-                );
-                break;
-            }
-        }
-
-        if failed {
+        let Some(engine) = engines.iter().next() else {
+            tracing::error!(
+                region = %region,
+                "Engine pool is empty; cannot preload music metas"
+            );
+            continue;
+        };
+        if let Err(err) = engine.update_musicmetas(&resolved_file_path, &region) {
+            tracing::error!(
+                region = %region,
+                resolved_file_path = %resolved_file_path,
+                error = %err,
+                "Failed to preload deck-service music metas"
+            );
             continue;
         }
 

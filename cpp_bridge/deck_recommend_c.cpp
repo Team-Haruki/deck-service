@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -210,11 +211,50 @@ static const std::set<std::string> VALID_EVENT_TYPES = {"marathon","cheerful_car
 static const std::set<std::string> VALID_SKILL_REF_STRATEGIES = {"average","max","min"};
 static const std::set<std::string> VALID_SKILL_ORDER_STRATEGIES = {"average","max","min","specific"};
 
+// ---- process-level shared cache for read-only region data ----
+// MasterData and MusicMetas are immutable after load. Sharing one shared_ptr
+// per region across every SekaiDeckRecommendC handle avoids paying N×|data|
+// when the engine pool spins up multiple handles.
+
+namespace {
+class SharedRegionDataStore {
+    mutable std::shared_mutex mutex_;
+    std::map<Region, std::shared_ptr<MasterData>> region_masterdata_;
+    std::map<Region, std::shared_ptr<MusicMetas>> region_musicmetas_;
+
+public:
+    void set_masterdata(Region region, std::shared_ptr<MasterData> data) {
+        std::unique_lock lock(mutex_);
+        region_masterdata_[region] = std::move(data);
+    }
+
+    void set_musicmetas(Region region, std::shared_ptr<MusicMetas> data) {
+        std::unique_lock lock(mutex_);
+        region_musicmetas_[region] = std::move(data);
+    }
+
+    std::shared_ptr<MasterData> get_masterdata(Region region) const {
+        std::shared_lock lock(mutex_);
+        auto it = region_masterdata_.find(region);
+        return it == region_masterdata_.end() ? nullptr : it->second;
+    }
+
+    std::shared_ptr<MusicMetas> get_musicmetas(Region region) const {
+        std::shared_lock lock(mutex_);
+        auto it = region_musicmetas_.find(region);
+        return it == region_musicmetas_.end() ? nullptr : it->second;
+    }
+};
+
+SharedRegionDataStore& shared_region_data_store() {
+    static SharedRegionDataStore instance;
+    return instance;
+}
+}
+
 // ---- internal SekaiDeckRecommend wrapper (same logic as pybind11 version) ----
 
 class SekaiDeckRecommendC {
-    std::map<Region, std::shared_ptr<MasterData>> region_masterdata;
-    std::map<Region, std::shared_ptr<MusicMetas>> region_musicmetas;
     std::unordered_map<std::string, std::shared_ptr<UserData>> userdata_cache;
     std::deque<std::string> userdata_cache_order;
 
@@ -276,15 +316,14 @@ class SekaiDeckRecommendC {
 
         auto userdata = resolve_userdata(opts);
 
-        if (!region_masterdata.count(region))
+        auto masterdata = shared_region_data_store().get_masterdata(region);
+        if (!masterdata)
             throw std::invalid_argument("Master data not found for region: " + region_str);
-        if (require_musicmetas && !region_musicmetas.count(region))
+        auto musicmetas = shared_region_data_store().get_musicmetas(region);
+        if (require_musicmetas && !musicmetas)
             throw std::invalid_argument("Music metas not found for region: " + region_str);
-
-        auto masterdata = region_masterdata[region];
-        auto musicmetas = region_musicmetas.count(region)
-            ? region_musicmetas[region]
-            : std::make_shared<MusicMetas>();
+        if (!musicmetas)
+            musicmetas = std::make_shared<MusicMetas>();
         return DataProvider{region, masterdata, userdata, musicmetas};
     }
 
@@ -357,7 +396,7 @@ public:
         auto r = REGION_MAP.at(region_str);
         auto next_masterdata = std::make_shared<MasterData>();
         next_masterdata->loadFromFiles(base_dir);
-        region_masterdata[r] = std::move(next_masterdata);
+        shared_region_data_store().set_masterdata(r, std::move(next_masterdata));
     }
 
     void update_masterdata_from_strings(std::map<std::string, std::string>& data, const std::string& region_str) {
@@ -374,7 +413,7 @@ public:
         }
         auto next_masterdata = std::make_shared<MasterData>();
         next_masterdata->loadFromStrings(normalized_data);
-        region_masterdata[r] = std::move(next_masterdata);
+        shared_region_data_store().set_masterdata(r, std::move(next_masterdata));
     }
 
     void update_musicmetas_file(const std::string& file_path, const std::string& region_str) {
@@ -383,7 +422,7 @@ public:
         auto r = REGION_MAP.at(region_str);
         auto next_musicmetas = std::make_shared<MusicMetas>();
         next_musicmetas->loadFromFile(file_path);
-        region_musicmetas[r] = std::move(next_musicmetas);
+        shared_region_data_store().set_musicmetas(r, std::move(next_musicmetas));
     }
 
     void update_musicmetas_string(const std::string& s, const std::string& region_str) {
@@ -392,7 +431,7 @@ public:
         auto r = REGION_MAP.at(region_str);
         auto next_musicmetas = std::make_shared<MusicMetas>();
         next_musicmetas->loadFromString(s);
-        region_musicmetas[r] = std::move(next_musicmetas);
+        shared_region_data_store().set_musicmetas(r, std::move(next_musicmetas));
     }
 
     std::string cache_userdata(const std::string& userdata_str) {
@@ -465,12 +504,12 @@ public:
         auto userdata = resolve_userdata(opts);
 
         // --- master data & music metas ---
-        if (!region_masterdata.count(region))
+        auto masterdata = shared_region_data_store().get_masterdata(region);
+        if (!masterdata)
             throw std::invalid_argument("Master data not found for region: " + region_str);
-        if (!region_musicmetas.count(region))
+        auto musicmetas = shared_region_data_store().get_musicmetas(region);
+        if (!musicmetas)
             throw std::invalid_argument("Music metas not found for region: " + region_str);
-        auto masterdata = region_masterdata[region];
-        auto musicmetas = region_musicmetas[region];
 
         DataProvider dp{region, masterdata, userdata, musicmetas};
 

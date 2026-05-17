@@ -7,7 +7,7 @@ on:
 
 env:
   DECK_CPP_REPO: "https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git"
-  DECK_CPP_REF: "0fe6c6fe0ebb4adfebc9b968a9fae2c6c9cb1e63"
+  DECK_CPP_REF: "d9b8649fef459e721dd2dd97bb7de6556a4a8558"
 
 jobs:
   build:

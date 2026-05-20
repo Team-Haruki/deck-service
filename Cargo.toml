@@ -13,3 +13,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ruzstd = "0.8"
 parking_lot = "0.12"
+
+[profile.release]
+lto = "thin"

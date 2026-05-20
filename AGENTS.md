@@ -4,7 +4,9 @@ This document describes conventions and context for AI coding agents working on 
 
 ## Project Overview
 
-deck-service is a Rust HTTP service (Axum) that wraps a C++ deck recommendation engine for Project Sekai via FFI. The C++ source lives in `_cpp_src/` (gitignored, cloned separately).
+deck-service is a Rust HTTP service (Axum) that wraps Team Haruki's C++ deck recommendation engine for Project Sekai via FFI. The C++ source lives in `_cpp_src/` (gitignored, cloned separately).
+
+The current upstream source is [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) on its default branch (`master`). Upstream now also ships Python bindings and a WebAssembly/npm target; deck-service consumes the same C++ core directly through `cpp_bridge/`, not through those packages.
 
 ## Language & Toolchain
 
@@ -12,6 +14,7 @@ deck-service is a Rust HTTP service (Axum) that wraps a C++ deck recommendation 
 - **C++20** compiled by `build.zig` for Zig targets; native Linux GNU uses system `c++`/`ar`
 - **Zig** is used only as a C++ compiler toolchain, not as the project language
 - Cross-compilation: `cargo zigbuild --target x86_64-unknown-linux-musl`
+- Upstream package tooling such as CMake, Python/uv, and emsdk is only needed when working in the C++ repository's Python or WebAssembly package targets.
 
 ## Architecture
 
@@ -63,6 +66,7 @@ Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) 
 - `build.zig` compiles the C++ source list from `cpp_sources.txt` + the C bridge into `libdeck_recommend.a` for Zig-backed targets
 - `build.rs` resolves `DECK_CPP_SRC` / `_cpp_src` / sibling source paths, invokes Zig, and emits Cargo link metadata
 - C++ source location resolved in order: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
+- Clone the upstream source with submodules, for example `git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src`
 - For musl targets, links `c++` and `c++abi` statically; macOS uses `c++`; Linux-gnu uses `stdc++`
 - Native Linux-gnu host builds use system `c++`/`ar` to avoid mixing system libstdc++ headers with Zig glibc headers
 

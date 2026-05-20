@@ -10,12 +10,14 @@ HTTP Request → Axum (Rust) → JSON FFI Bridge → C++ Engine → JSON Respons
 
 - **Rust + Axum** — async HTTP server with JSON request/response handling
 - **C FFI Bridge** (`cpp_bridge/`) — translates between Rust and the C++ engine via JSON strings
-- **C++ Engine** (`_cpp_src/`) — [sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp), the core recommendation algorithms
+- **C++ Engine** (`_cpp_src/`) — Team Haruki's maintained [sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) fork, consumed here as core C++ sources through a C/Rust FFI bridge
 - **Zig** — builds the C++ bridge/engine archive for static/cross targets through `build.zig`
 
 The output binary is **fully statically linked** (musl libc) with no runtime dependencies, ideal for minimal container images.
 
 ## Prerequisites
+
+For deck-service itself:
 
 - [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024)
 - [Zig](https://ziglang.org/download/) ≥ 0.14
@@ -27,15 +29,35 @@ cargo install cargo-zigbuild
 rustup target add x86_64-unknown-linux-musl
 ```
 
+The upstream C++ repository also publishes Python and WebAssembly packages. Its
+own packaging workflows use CMake, Python 3.10+, `uv`, and `emsdk`, but those are
+not required for building this HTTP service unless you are working directly on
+the upstream package targets.
+
 ## Building
 
 ### Clone C++ source
 
-The C++ source is gitignored. Clone it into `_cpp_src/`:
+The C++ source is gitignored. The current deck-service build tracks Team
+Haruki's default upstream branch (`master`). Clone it into `_cpp_src/` with
+submodules:
 
 ```bash
-git clone https://github.com/Team-Haruki/sekai-deck-recommend-cpp _cpp_src
-cd _cpp_src && git submodule update --init --recursive && cd ..
+git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src
+```
+
+For an existing checkout:
+
+```bash
+git -C _cpp_src fetch origin master
+git -C _cpp_src checkout master
+git -C _cpp_src submodule update --init --recursive
+```
+
+You can also keep the C++ repository elsewhere and point builds at it:
+
+```bash
+export DECK_CPP_SRC=/path/to/sekai-deck-recommend-cpp
 ```
 
 ### Native build (macOS / Linux)
@@ -55,8 +77,15 @@ Output: `target/x86_64-unknown-linux-musl/release/deck-service` (~4 MB, statical
 ## Running
 
 ```bash
-# Required: path to the C++ engine's static data directory
+# Required: path to the C++ engine's static data directory.
+# This is the upstream static data/, not runtime masterdata/music metas.
 export DECK_DATA_DIR=/path/to/_cpp_src/data
+
+# Optional: preload region masterdata at startup
+export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
+
+# Optional: preload music metas at startup
+export DECK_MUSICMETAS_BASE_DIR=/path/to/music-metas-root
 
 # Optional: listen address (default: 0.0.0.0:3000)
 export BIND_ADDR=0.0.0.0:3000
@@ -82,6 +111,22 @@ export DECK_RECOMMEND_TIMEOUT_MS=15000
 ./deck-service
 ```
 
+Masterdata, music metas, and userdata are application/runtime inputs. They are
+not bundled by the upstream WebAssembly npm package, and deck-service follows
+the same model: static engine data comes from `_cpp_src/data`, while region data
+is loaded by startup env vars or update endpoints.
+
+## Upstream Packages
+
+The upstream README documents these package targets:
+
+- Python package: `haruki-sekai-deck-recommend-cpp`, installable with `uv add`, `uv pip install`, or `pip install`.
+- Source install: `git clone --recursive`, then `uv pip install -e . -v` or `pip install -e . -v`.
+- WebAssembly npm package: `npm/haruki-sekai-deck-recommend-cpp`, built with activated `emsdk` using `emcmake cmake -S . -B build_wasm -G Ninja -DCMAKE_BUILD_TYPE=Release`, `cmake --build build_wasm -j`, then `npm pack`.
+
+deck-service does not import the Python or npm packages; it links the same C++
+engine sources directly through `cpp_bridge/`.
+
 ## Docker
 
 ```bash
@@ -90,10 +135,15 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 ```
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
+By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
+`master` at commit `12014c86a36b6aa7e9c08e4151d38dd035e3c8dd`;
+override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
+you intentionally need a different engine checkout.
 
 ## API Reference
 
-All endpoints accept and return JSON. The body size limit is 1000 MB.
+Most endpoints accept and return JSON. `/cache_userdata` and batch `/recommend`
+use the binary protocol described below. The body size limit is 1000 MB.
 
 ### Health Check
 
@@ -124,6 +174,7 @@ Content-Type: application/json
 | --- | --- | --- |
 | `target` | `string` | Optimization target (`"score"`, `"skill"`, `"power"`, `"bonus"`) |
 | `algorithm` | `string` | Search algorithm (`"dfs"`, `"ga"`, `"dfs_ga"`, `"rl"`) |
+| `userdata_hash` | `string` | Hash returned by `/cache_userdata` for server-side cached userdata |
 | `user_data_file_path` | `string` | Path to user data file |
 | `user_data_str` | `string` | User data as inline JSON string |
 | `event_id` | `int` | Event ID |
@@ -138,9 +189,22 @@ Content-Type: application/json
 | `timeout_ms` | `int` | Timeout in milliseconds |
 | `rarity_*_config` | `object` | Card config per rarity (`1`, `2`, `3`, `birthday`, `4`) |
 | `single_card_configs` | `array` | Per-card overrides |
+| `support_master_max` | `bool` | Treat support cards as max master rank |
+| `support_skill_max` | `bool` | Treat support cards as max skill level |
 | `filter_other_unit` | `bool` | Filter cards from other units |
 | `fixed_cards` | `int[]` | Cards that must be in the deck |
 | `fixed_characters` | `int[]` | Characters that must be in the deck |
+| `forced_leader_character_id` | `int` | Force the leader card's character ID |
+| `target_bonus_list` | `int[]` | Target bonus card IDs/values passed through to the engine |
+| `skill_reference_choose_strategy` | `string` | Skill reference strategy passed through to the engine |
+| `keep_after_training_state` | `bool` | Keep cards' existing after-training state |
+| `multi_live_teammate_score_up` | `int` | Multi-live teammate score-up value |
+| `multi_live_teammate_power` | `int` | Multi-live teammate power value |
+| `best_skill_as_leader` | `bool` | Prefer best skill as leader |
+| `multi_live_score_up_lower_bound` | `float` | Lower bound for multi-live score-up |
+| `skill_order_choose_strategy` | `string` | Skill order strategy passed through to the engine |
+| `specific_skill_order` | `int[]` | Explicit skill order |
+| `sa_options` | `object` | Simulated annealing parameters |
 | `ga_options` | `object` | Genetic algorithm parameters for `ga`, `dfs_ga`, and `rl` |
 
 **Response:**
@@ -185,6 +249,60 @@ Content-Type: application/json
 }
 ```
 
+### Cache Userdata
+
+```
+POST /cache_userdata
+Content-Type: application/octet-stream
+```
+
+Request body: zstd-compressed binary protocol with exactly one userdata JSON
+segment.
+
+Response:
+
+```json
+{ "userdata_hash": "..." }
+```
+
+Use the returned `userdata_hash` in later `/recommend` requests to avoid
+resending large userdata payloads.
+
+### Batch Recommend
+
+```
+POST /recommend
+Content-Type: application/octet-stream
+```
+
+Request body: zstd-compressed binary protocol with exactly one JSON segment:
+
+```json
+{
+  "region": "jp",
+  "userdata_hash": "...",
+  "batch_options": [
+    {
+      "live_type": "multi",
+      "music_id": 74,
+      "music_diff": "expert",
+      "algorithm": "ga",
+      "timeout_ms": 15000
+    }
+  ]
+}
+```
+
+Response: JSON array of per-item results with `alg`, `cost_time`, `wait_time`,
+and either `result` or `error`.
+
+### Binary Protocol
+
+For `application/octet-stream` endpoints, concatenate one or more segments as
+`4-byte big-endian length + payload`, then zstd-compress the whole framed byte
+stream. `/cache_userdata` and batch `/recommend` currently expect exactly one
+segment.
+
 ### Update Masterdata (from directory)
 
 ```
@@ -222,6 +340,11 @@ POST /update/musicmetas/string
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
+| `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Base directory used to preload region masterdata on startup |
+| `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload masterdata for |
+| `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` | masterdata base, then `/app/data` | Base directory used to preload region music metas on startup |
+| `DECK_MUSICMETAS_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload music metas for |
+| `DECK_MUSICMETAS_FILE_<REGION>` | unset | Explicit music metas file path for one region, e.g. `DECK_MUSICMETAS_FILE_JP` |
 | `BIND_ADDR` | `0.0.0.0:3000` | HTTP server listen address |
 | `RUST_LOG` | `deck_service=info` | Tracing log filter |
 | `DECK_LOCK_WARN_MS` | `1000` | Warn threshold for waiting on an engine pool slot |
@@ -289,7 +412,7 @@ deck-service/
 ├── cpp_sources.txt      # C++ engine source list shared by build tooling
 ├── Cargo.toml
 ├── Dockerfile
-└── _cpp_src/            # (gitignored) cloned C++ engine source
+└── _cpp_src/            # (gitignored) cloned Team Haruki C++ engine source
 ```
 
 ## License
@@ -300,4 +423,4 @@ LGPL-2.1 — see [LICENSE](LICENSE).
 
 - [xfl03/sekai-calculator](https://github.com/xfl03/sekai-calculator) — original algorithms and implementation
 - [NeuraXmy/sekai-deck-recommend-cpp](https://github.com/NeuraXmy/sekai-deck-recommend-cpp) — C++ engine original implementation
-- [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) — current C++ engine maintenance
+- [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) — current C++ engine maintenance, Python package, and WebAssembly/npm target

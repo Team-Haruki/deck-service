@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Rust/Axum HTTP service wrapping a C++ Project Sekai deck recommendation engine via FFI. Requests flow through: `handlers.rs -> bridge.rs -> ffi.rs -> cpp_bridge/ -> _cpp_src/ (C++ engine)`. The FFI boundary uses JSON strings serialized with `sonic_rs`.
+A Rust/Axum HTTP service wrapping Team Haruki's maintained C++ Project Sekai deck recommendation engine via FFI. Requests flow through: `handlers.rs -> bridge.rs -> ffi.rs -> cpp_bridge/ -> _cpp_src/ (C++ engine)`. The FFI boundary uses JSON strings serialized with `sonic_rs`.
+
+The current upstream source is `Team-Haruki/sekai-deck-recommend-cpp` on its
+default branch (`master`). Upstream now ships Python and WebAssembly/npm
+package targets; deck-service links only the C++ core sources through its own
+C bridge.
 
 ## Build & Run
 
@@ -12,8 +17,7 @@ A Rust/Axum HTTP service wrapping a C++ Project Sekai deck recommendation engine
 
 ```bash
 # Clone C++ engine source (gitignored, required for build)
-git clone https://github.com/Team-Haruki/sekai-deck-recommend-cpp _cpp_src
-cd _cpp_src && git submodule update --init --recursive && cd ..
+git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src
 
 # Native build
 cargo build --release
@@ -49,6 +53,9 @@ Userdata is cached server-side: clients call `/cache_userdata` first, then refer
 - `DECK_DATA_DIR` -- path to C++ engine static data (required at runtime)
 - `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` -- masterdata directory for preloading on startup
 - `DECK_MASTERDATA_REGIONS` -- CSV of regions to preload (default: jp,en,cn,tw,kr)
+- `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` -- music metas directory for preloading on startup
+- `DECK_MUSICMETAS_REGIONS` -- CSV of music metas regions to preload (default: jp,en,cn,tw,kr)
+- `DECK_MUSICMETAS_FILE_<REGION>` -- explicit music metas file for one region
 - `DECK_ENGINE_POOL_SIZE` -- number of engine instances
 - `DECK_RECOMMEND_TIMEOUT_MS` -- default timeout injected when requests omit `timeout_ms`
 

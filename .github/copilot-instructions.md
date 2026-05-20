@@ -1,6 +1,8 @@
 ## Project Context
 
-deck-service is a Rust (Axum) HTTP service wrapping a C++ Project Sekai deck recommendation engine via FFI.
+deck-service is a Rust (Axum) HTTP service wrapping Team Haruki's C++ Project Sekai deck recommendation engine via FFI. The current upstream source is `Team-Haruki/sekai-deck-recommend-cpp` on its default branch (`master`).
+
+Upstream now ships Python bindings and a WebAssembly/npm package target. deck-service links the C++ core directly through `cpp_bridge/`; it does not import the upstream Python or npm packages.
 
 ## Code Style
 
@@ -14,6 +16,7 @@ deck-service is a Rust (Axum) HTTP service wrapping a C++ Project Sekai deck rec
 
 - C++ compiled by `build.zig` for Zig-backed targets; native Linux GNU uses system `c++`/`ar`
 - C++ source resolved from: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
+- Clone source with submodules, e.g. `git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src`
 - Cross-compile: `cargo zigbuild --target x86_64-unknown-linux-musl`
 - Docker: multi-stage build → `scratch` image (static musl binary)
 

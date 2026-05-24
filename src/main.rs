@@ -70,6 +70,10 @@ async fn main() {
         .route("/cache_userdata", post(handlers::cache_userdata))
         .route("/recommend", post(handlers::recommend))
         .route("/calculate", post(handlers::calculate))
+        .route(
+            "/world_bloom/support_cards",
+            post(handlers::world_bloom_support_cards),
+        )
         .route("/update/masterdata", post(handlers::update_masterdata))
         .route(
             "/update/masterdata/json",

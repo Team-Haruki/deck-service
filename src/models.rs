@@ -19,6 +19,14 @@ pub struct CardConfig {
     pub skill_max: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_rank: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_read_count: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,6 +44,14 @@ pub struct SingleCardConfig {
     pub skill_max: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_rank: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_read_count: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,6 +164,12 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_bonus_list: Option<Vec<i32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_bonus_character_ids: Option<Vec<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_bonus_attr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_bonus_character_support_units: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_reference_choose_strategy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_after_training_state: Option<bool>,
@@ -184,6 +206,34 @@ pub struct CalculateOptions {
     pub deck_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorldBloomSupportOptions {
+    pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userdata_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_data_file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_data_str: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_bloom_event_turn: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_bloom_character_id: Option<i32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "forcedLeaderCharacterId"
+    )]
+    pub forced_leader_character_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_master_max: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_skill_max: Option<bool>,
 }
 
 // ---- Response types ----
@@ -241,29 +291,17 @@ pub struct DeckRecommendResult {
     pub decks: Vec<RecommendDeck>,
 }
 
-pub type BatchRecommendOption = BTreeMap<String, Value>;
-
-#[derive(Debug, Deserialize)]
-pub struct BatchRecommendRequest {
-    pub region: String,
-    pub batch_options: Vec<BatchRecommendOption>,
-    pub userdata_hash: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct CacheUserdataResponse {
     pub userdata_hash: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct BatchRecommendResponseItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub alg: Option<String>,
     pub cost_time: f64,
     pub wait_time: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<DeckRecommendResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     pub error: Option<String>,
 }
 

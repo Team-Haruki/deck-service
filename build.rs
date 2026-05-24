@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 const LIB_NAME: &str = "deck_recommend";
 const BRIDGE_SOURCE: &str = "deck_recommend_c.cpp";
+const YYJSON_SOURCE: &str = "yyjson.c";
 
 fn has_cpp_layout(path: &Path) -> bool {
     path.join("src").is_dir() && path.join("3rdparty").is_dir()
@@ -201,7 +202,7 @@ fn compile_cpp_object(
     zig_target: &str,
     use_libstdcpp: bool,
     cpp_src: &Path,
-    json_include: &Path,
+    yyjson_include: &Path,
     bridge_dir: &Path,
     source: &Path,
     object: &Path,
@@ -217,7 +218,7 @@ fn compile_cpp_object(
         .arg("-I")
         .arg(cpp_src)
         .arg("-I")
-        .arg(json_include)
+        .arg(yyjson_include)
         .arg("-I")
         .arg(bridge_dir)
         .arg("-c")
@@ -232,6 +233,24 @@ fn compile_cpp_object(
     run_checked(&mut command, &format!("compile {}", source.display()));
 }
 
+fn compile_c_object_zig(zig_target: &str, include_dir: &Path, source: &Path, object: &Path) {
+    let mut command = Command::new("zig");
+    command
+        .arg("cc")
+        .arg("-target")
+        .arg(zig_target)
+        .arg("-O2")
+        .arg("-fno-sanitize=all")
+        .arg("-I")
+        .arg(include_dir)
+        .arg("-c")
+        .arg(source)
+        .arg("-o")
+        .arg(object);
+
+    run_checked(&mut command, &format!("compile {}", source.display()));
+}
+
 fn run_direct_zig_tools(
     root: &Path,
     cpp_root: &Path,
@@ -239,9 +258,8 @@ fn run_direct_zig_tools(
     zig_target: &str,
     use_libstdcpp: bool,
 ) -> PathBuf {
-    let archiver = env_tool("AR", "ar");
     let cpp_src = cpp_root.join("src");
-    let json_include = cpp_root.join("3rdparty/json/single_include");
+    let yyjson_include = cpp_root.join("3rdparty/yyjson/src");
     let bridge_dir = root.join("cpp_bridge");
     let sources = load_cpp_sources(root);
     let direct_dir = out_dir.join("zig-direct");
@@ -254,14 +272,14 @@ fn run_direct_zig_tools(
     fs::create_dir_all(&lib_dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", lib_dir.display()));
 
-    let mut objects = Vec::with_capacity(sources.len() + 1);
+    let mut objects = Vec::with_capacity(sources.len() + 2);
     for (index, source) in sources.iter().enumerate() {
         let object = obj_dir.join(object_name(index, source));
         compile_cpp_object(
             zig_target,
             use_libstdcpp,
             &cpp_src,
-            &json_include,
+            &yyjson_include,
             &bridge_dir,
             &cpp_src.join(source),
             &object,
@@ -274,24 +292,35 @@ fn run_direct_zig_tools(
         zig_target,
         use_libstdcpp,
         &cpp_src,
-        &json_include,
+        &yyjson_include,
         &bridge_dir,
         &bridge_dir.join(BRIDGE_SOURCE),
         &bridge_object,
     );
     objects.push(bridge_object);
 
+    let yyjson_object = obj_dir.join(object_name(sources.len() + 1, YYJSON_SOURCE));
+    compile_c_object_zig(
+        zig_target,
+        &yyjson_include,
+        &yyjson_include.join(YYJSON_SOURCE),
+        &yyjson_object,
+    );
+    objects.push(yyjson_object);
+
     let lib_path = static_lib_path(&lib_dir);
     let _ = fs::remove_file(&lib_path);
 
-    let mut archive = Command::new(&archiver);
+    let mut archive = Command::new("zig");
+    archive.arg("ar");
     archive.arg("cq").arg(&lib_path);
     archive.args(objects.iter().map(PathBuf::as_path));
-    run_checked(&mut archive, "archive direct C++ objects");
+    run_checked(&mut archive, "archive direct Zig-built C++ objects");
 
-    let mut index = Command::new(&archiver);
+    let mut index = Command::new("zig");
+    index.arg("ar");
     index.arg("s").arg(&lib_path);
-    run_checked(&mut index, "index direct C++ archive");
+    run_checked(&mut index, "index direct Zig-built C++ archive");
 
     lib_dir
 }
@@ -299,7 +328,7 @@ fn run_direct_zig_tools(
 fn compile_native_cpp_object(
     compiler: &str,
     cpp_src: &Path,
-    json_include: &Path,
+    yyjson_include: &Path,
     bridge_dir: &Path,
     source: &Path,
     object: &Path,
@@ -312,7 +341,7 @@ fn compile_native_cpp_object(
         .arg("-I")
         .arg(cpp_src)
         .arg("-I")
-        .arg(json_include)
+        .arg(yyjson_include)
         .arg("-I")
         .arg(bridge_dir)
         .arg("-c")
@@ -323,11 +352,27 @@ fn compile_native_cpp_object(
     run_checked(&mut command, &format!("compile {}", source.display()));
 }
 
+fn compile_native_c_object(compiler: &str, include_dir: &Path, source: &Path, object: &Path) {
+    let mut command = Command::new(compiler);
+    command
+        .arg("-O2")
+        .arg("-fno-sanitize=all")
+        .arg("-I")
+        .arg(include_dir)
+        .arg("-c")
+        .arg(source)
+        .arg("-o")
+        .arg(object);
+
+    run_checked(&mut command, &format!("compile {}", source.display()));
+}
+
 fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf {
     let cpp_compiler = env_tool("CXX", "c++");
+    let c_compiler = env_tool("CC", "cc");
     let archiver = env_tool("AR", "ar");
     let cpp_src = cpp_root.join("src");
-    let json_include = cpp_root.join("3rdparty/json/single_include");
+    let yyjson_include = cpp_root.join("3rdparty/yyjson/src");
     let bridge_dir = root.join("cpp_bridge");
     let sources = load_cpp_sources(root);
     let native_dir = out_dir.join("native-cpp");
@@ -340,13 +385,13 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
     fs::create_dir_all(&lib_dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", lib_dir.display()));
 
-    let mut objects = Vec::with_capacity(sources.len() + 1);
+    let mut objects = Vec::with_capacity(sources.len() + 2);
     for (index, source) in sources.iter().enumerate() {
         let object = obj_dir.join(object_name(index, source));
         compile_native_cpp_object(
             &cpp_compiler,
             &cpp_src,
-            &json_include,
+            &yyjson_include,
             &bridge_dir,
             &cpp_src.join(source),
             &object,
@@ -358,12 +403,21 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
     compile_native_cpp_object(
         &cpp_compiler,
         &cpp_src,
-        &json_include,
+        &yyjson_include,
         &bridge_dir,
         &bridge_dir.join(BRIDGE_SOURCE),
         &bridge_object,
     );
     objects.push(bridge_object);
+
+    let yyjson_object = obj_dir.join(object_name(sources.len() + 1, YYJSON_SOURCE));
+    compile_native_c_object(
+        &c_compiler,
+        &yyjson_include,
+        &yyjson_include.join(YYJSON_SOURCE),
+        &yyjson_object,
+    );
+    objects.push(yyjson_object);
 
     let lib_path = static_lib_path(&lib_dir);
     let _ = fs::remove_file(&lib_path);
@@ -383,6 +437,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
 fn emit_rerun_metadata(root: &Path, cpp_root: &Path) {
     println!("cargo:rerun-if-env-changed=DECK_CPP_SRC");
     println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=AR");
     println!(
         "cargo:rerun-if-changed={}",
@@ -401,6 +456,14 @@ fn emit_rerun_metadata(root: &Path, cpp_root: &Path) {
     for source in load_cpp_sources(root) {
         println!("cargo:rerun-if-changed={}", cpp_src.join(source).display());
     }
+    println!(
+        "cargo:rerun-if-changed={}",
+        cpp_root.join("3rdparty/yyjson/src/yyjson.c").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        cpp_root.join("3rdparty/yyjson/src/yyjson.h").display()
+    );
 }
 
 fn emit_cpp_stdlib_links(target: &str) {

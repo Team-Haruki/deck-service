@@ -3,19 +3,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Json;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use sonic_rs::{JsonValueTrait, json};
+use sonic_rs::{LazyValue, json};
 
 use crate::error::AppError;
 use crate::masterdata::resolve_masterdata_base_dir;
 use crate::models::{
-    BatchRecommendRequest, BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions,
-    DeckRecommendOptions, DeckRecommendResult, UpdateMasterdataFromJsonRequest,
-    UpdateMasterdataRequest, UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest,
+    BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions,
+    UpdateMasterdataFromJsonRequest, UpdateMasterdataRequest, UpdateMusicmetasFromStringRequest,
+    UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
 use crate::state::{AppState, EngineLease};
 
@@ -81,6 +82,53 @@ pub async fn calculate(
 ) -> Result<Json<sonic_rs::Value>, AppError> {
     let options = parse_json_body::<CalculateOptions>(&body, "calculate")?;
     calculate_with_options(state, options, "calculate").await
+}
+
+pub async fn world_bloom_support_cards(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<sonic_rs::Value>, AppError> {
+    let op_id = state.next_op_id();
+    let request_started = Instant::now();
+    let options = parse_json_body::<WorldBloomSupportOptions>(&body, "world bloom support cards")?;
+    let userdata_hash = normalize_userdata_hash(options.userdata_hash.as_deref());
+    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+
+    tracing::info!(
+        op_id,
+        op = "world_bloom_support_cards",
+        region = %options.region,
+        event_id = options.event_id.unwrap_or_default(),
+        world_bloom_event_turn = options.world_bloom_event_turn.unwrap_or_default(),
+        world_bloom_character_id = options.world_bloom_character_id.unwrap_or_default(),
+        hash_prefix = %userdata_hash.as_deref().map(|hash| truncate_head(hash, 8)).unwrap_or_default(),
+        "World bloom support cards request parsed"
+    );
+
+    let result = tokio::task::block_in_place(|| {
+        run_engine_op(
+            state.as_ref(),
+            op_id,
+            "world_bloom_support_cards",
+            |engine| {
+                if let (Some(userdata_hash), Some(userdata_payload)) =
+                    (userdata_hash.as_deref(), userdata_payload.as_deref())
+                {
+                    ensure_userdata_hash(engine, userdata_hash, userdata_payload)?;
+                }
+                engine.get_world_bloom_support_cards_value(&options)
+            },
+        )
+    })?;
+
+    tracing::info!(
+        op_id,
+        op = "world_bloom_support_cards",
+        elapsed_ms = elapsed_ms(request_started.elapsed()),
+        "World bloom support cards request completed"
+    );
+
+    Ok(Json(result))
 }
 
 pub async fn recommend(
@@ -244,38 +292,73 @@ where
         .map_err(|e| AppError::BadRequest(format!("invalid {name} payload: {e}")))
 }
 
+#[derive(Debug, Deserialize)]
+struct RecommendRequestMeta {
+    region: String,
+    live_type: String,
+    music_id: i32,
+    music_diff: String,
+    #[serde(default)]
+    userdata_hash: Option<String>,
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchRecommendRequest<'a> {
+    region: String,
+    #[serde(borrow)]
+    batch_options: Vec<LazyValue<'a>>,
+    userdata_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchRecommendItemMeta {
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<i64>,
+}
+
 async fn recommend_legacy(
     state: Arc<AppState>,
     body: Bytes,
     op_id: u64,
 ) -> Result<Response, AppError> {
     let request_started = Instant::now();
-    let mut options: DeckRecommendOptions = sonic_rs::from_slice(body.as_ref())
+    let options_json = std::str::from_utf8(body.as_ref())
+        .map_err(|_| AppError::BadRequest("recommend payload must be valid UTF-8 JSON".into()))?;
+    let meta: RecommendRequestMeta = sonic_rs::from_slice(body.as_ref())
         .map_err(|e| AppError::BadRequest(format!("invalid recommend payload: {e}")))?;
-    inject_default_recommend_timeout(&mut options, state.as_ref());
-    let userdata_hash = normalize_userdata_hash(options.userdata_hash.as_deref());
+    let userdata_hash = normalize_userdata_hash(meta.userdata_hash.as_deref());
     let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+    let default_timeout_ms = state.debug.default_recommend_timeout_ms;
+    let timeout_ms = meta.timeout_ms.or(default_timeout_ms).unwrap_or_default();
     tracing::info!(
         op_id,
         op = "recommend_legacy",
-        region = %options.region,
-        live_type = %options.live_type,
-        music_id = options.music_id,
-        music_diff = %options.music_diff,
-        algorithm = options.algorithm.as_deref().unwrap_or(""),
-        target = options.target.as_deref().unwrap_or(""),
-        timeout_ms = options.timeout_ms.unwrap_or_default(),
+        region = %meta.region,
+        live_type = %meta.live_type,
+        music_id = meta.music_id,
+        music_diff = %meta.music_diff,
+        algorithm = meta.algorithm.as_deref().unwrap_or(""),
+        target = meta.target.as_deref().unwrap_or(""),
+        timeout_ms,
         "Legacy recommend request parsed"
     );
 
-    let result: DeckRecommendResult = tokio::task::block_in_place(|| {
+    let result = tokio::task::block_in_place(|| {
         run_engine_op(state.as_ref(), op_id, "recommend_legacy", |engine| {
             if let (Some(userdata_hash), Some(userdata_payload)) =
                 (userdata_hash.as_deref(), userdata_payload.as_deref())
             {
                 ensure_userdata_hash(engine, userdata_hash, userdata_payload)?;
             }
-            engine.recommend(&options)
+            engine.recommend_raw_with_default_timeout(options_json, default_timeout_ms)
         })
     })?;
 
@@ -283,11 +366,11 @@ async fn recommend_legacy(
         op_id,
         op = "recommend_legacy",
         elapsed_ms = elapsed_ms(request_started.elapsed()),
-        deck_count = result.decks.len(),
+        response_bytes = result.len(),
         "Legacy recommend request completed"
     );
 
-    Ok(Json(result).into_response())
+    json_response(result)
 }
 
 async fn recommend_batch(
@@ -296,7 +379,9 @@ async fn recommend_batch(
     op_id: u64,
 ) -> Result<Response, AppError> {
     let request_started = Instant::now();
-    let req = parse_batch_recommend_request(body.as_ref())?;
+    let payload = parse_single_decompressed_json_segment(body.as_ref(), "batch recommend")?;
+    let req: BatchRecommendRequest<'_> = sonic_rs::from_slice(&payload)
+        .map_err(|e| AppError::BadRequest(format!("invalid batch recommend payload: {e}")))?;
 
     if req.batch_options.is_empty() {
         return Err(AppError::BadRequest(
@@ -321,145 +406,70 @@ async fn recommend_batch(
         batch_options,
         userdata_hash,
     } = req;
+    let batch_options = batch_options
+        .into_iter()
+        .map(|option| option.as_raw_str().to_owned())
+        .collect::<Vec<_>>();
     let userdata_payload = resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?
         .expect("batch recommend requires userdata payload");
-    let mut handles = Vec::with_capacity(batch_options.len());
+    let item_count = batch_options.len();
+    let worker_count = state.engines.size().min(item_count);
+    let default_timeout_ms = state.debug.default_recommend_timeout_ms;
+    let results = tokio::task::block_in_place(|| {
+        std::thread::scope(|scope| {
+            let next_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut handles = Vec::with_capacity(worker_count);
 
-    for (index, mut option) in batch_options.into_iter().enumerate() {
-        inject_default_batch_timeout(&mut option, state.as_ref());
-        let alg = option
-            .get("algorithm")
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned);
-        let timeout_ms = option
-            .get("timeout_ms")
-            .and_then(|value| value.as_i64())
-            .unwrap_or_default();
+            for _ in 0..worker_count {
+                let state = Arc::clone(&state);
+                let region = &region;
+                let userdata_hash = &userdata_hash;
+                let userdata_payload = Arc::clone(&userdata_payload);
+                let batch_options = &batch_options;
+                let next_index = Arc::clone(&next_index);
 
-        let state = Arc::clone(&state);
-        let region = region.clone();
-        let userdata_hash = userdata_hash.clone();
-        let userdata_payload = Arc::clone(&userdata_payload);
-        handles.push(tokio::task::spawn_blocking(move || {
-            option.insert("region".into(), json!(region.as_str()));
-            option.insert("userdata_hash".into(), json!(userdata_hash.as_str()));
-
-            tracing::debug!(
-                op_id,
-                op = "recommend_batch_item",
-                item_index = index,
-                region = %region,
-                algorithm = alg.as_deref().unwrap_or(""),
-                timeout_ms,
-                "Starting batch recommendation item"
-            );
-
-            match run_engine_op_with_stats(
-                state.as_ref(),
-                op_id,
-                "recommend_batch_item",
-                |engine| {
-                    ensure_userdata_hash(engine, &userdata_hash, userdata_payload.as_ref())?;
-                    engine.recommend_value(&option)
-                },
-            ) {
-                Ok(stats) => {
-                    let support_deck_debug = summarize_support_deck_debug(&stats.value);
-                    tracing::info!(
-                        op_id,
-                        op = "recommend_batch_item",
-                        item_index = index,
-                        region = %region,
-                        algorithm = alg.as_deref().unwrap_or(""),
-                        timeout_ms,
-                        wait_ms = elapsed_ms(stats.lock_elapsed),
-                        elapsed_ms = elapsed_ms(stats.engine_elapsed),
-                        deck_count = stats.value.decks.len(),
-                        support_deck = %support_deck_debug,
-                        "Batch recommendation item completed"
-                    );
-                    (
-                        index,
-                        BatchRecommendResponseItem {
-                            alg,
-                            cost_time: stats.engine_elapsed.as_secs_f64(),
-                            wait_time: stats.lock_elapsed.as_secs_f64(),
-                            result: Some(stats.value),
-                            error: None,
-                        },
-                    )
-                }
-                Err(AppError::Engine(err)) => {
-                    tracing::warn!(
-                        op_id,
-                        op = "recommend_batch_item",
-                        item_index = index,
-                        region = %region,
-                        algorithm = alg.as_deref().unwrap_or(""),
-                        timeout_ms,
-                        error = %err,
-                        "Batch deck recommendation failed"
-                    );
-                    (
-                        index,
-                        BatchRecommendResponseItem {
-                            alg,
-                            cost_time: 0.0,
-                            wait_time: 0.0,
-                            result: None,
-                            error: Some(err),
-                        },
-                    )
-                }
-                Err(AppError::Timeout(err)) => {
-                    tracing::warn!(
-                        op_id,
-                        op = "recommend_batch_item",
-                        item_index = index,
-                        region = %region,
-                        algorithm = alg.as_deref().unwrap_or(""),
-                        timeout_ms,
-                        error = %err,
-                        "Batch deck recommendation timed out"
-                    );
-                    (
-                        index,
-                        BatchRecommendResponseItem {
-                            alg,
-                            cost_time: 0.0,
-                            wait_time: 0.0,
-                            result: None,
-                            error: Some(err),
-                        },
-                    )
-                }
-                Err(err) => (
-                    index,
-                    BatchRecommendResponseItem {
-                        alg,
-                        cost_time: 0.0,
-                        wait_time: 0.0,
-                        result: None,
-                        error: Some(err.to_string()),
-                    },
-                ),
+                handles.push(scope.spawn(move || {
+                    let mut items = Vec::new();
+                    loop {
+                        let index = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(option_json) = batch_options.get(index) else {
+                            break;
+                        };
+                        items.push(process_batch_recommend_item(
+                            state.as_ref(),
+                            op_id,
+                            index,
+                            region,
+                            userdata_hash,
+                            userdata_payload.as_ref(),
+                            option_json,
+                            default_timeout_ms,
+                        ));
+                    }
+                    items
+                }));
             }
-        }));
-    }
 
-    let mut results = std::iter::repeat_with(|| None)
-        .take(handles.len())
-        .collect::<Vec<Option<BatchRecommendResponseItem>>>();
-    for handle in handles {
-        let (index, item) = handle
-            .await
-            .map_err(|err| AppError::Engine(format!("batch recommend worker join error: {err}")))?;
-        results[index] = Some(item);
-    }
-    let results = results
-        .into_iter()
-        .map(|item| item.expect("batch recommend worker did not return a response"))
-        .collect::<Vec<_>>();
+            let mut results = std::iter::repeat_with(|| None)
+                .take(item_count)
+                .collect::<Vec<Option<BatchRecommendResponseItem>>>();
+            for handle in handles {
+                let items = handle
+                    .join()
+                    .map_err(|_| AppError::Engine("batch recommend worker panicked".into()))?;
+                for (index, item) in items {
+                    results[index] = Some(item);
+                }
+            }
+
+            Ok::<_, AppError>(
+                results
+                    .into_iter()
+                    .map(|item| item.expect("batch recommend worker did not return a response"))
+                    .collect::<Vec<_>>(),
+            )
+        })
+    })?;
 
     tracing::info!(
         op_id,
@@ -469,7 +479,7 @@ async fn recommend_batch(
         "Batch recommend request completed"
     );
 
-    Ok(Json(results).into_response())
+    json_response(batch_recommend_response_json(&results)?)
 }
 
 async fn calculate_with_options(
@@ -506,6 +516,125 @@ async fn calculate_with_options(
     Ok(Json(result))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn process_batch_recommend_item(
+    state: &AppState,
+    op_id: u64,
+    index: usize,
+    region: &str,
+    userdata_hash: &str,
+    userdata_payload: &str,
+    option_json: &str,
+    default_timeout_ms: Option<i32>,
+) -> (usize, BatchRecommendResponseItem) {
+    let meta = sonic_rs::from_str::<BatchRecommendItemMeta>(option_json).ok();
+    let alg = meta.as_ref().and_then(|meta| meta.algorithm.clone());
+    let timeout_ms = meta
+        .as_ref()
+        .and_then(|meta| meta.timeout_ms)
+        .or(default_timeout_ms.map(i64::from))
+        .unwrap_or_default();
+
+    tracing::debug!(
+        op_id,
+        op = "recommend_batch_item",
+        item_index = index,
+        region = %region,
+        algorithm = alg.as_deref().unwrap_or(""),
+        timeout_ms,
+        "Starting batch recommendation item"
+    );
+
+    match run_engine_op_with_stats(state, op_id, "recommend_batch_item", |engine| {
+        ensure_userdata_hash(engine, userdata_hash, userdata_payload)?;
+        engine.recommend_raw_with_context(
+            option_json,
+            Some(region),
+            Some(userdata_hash),
+            default_timeout_ms,
+        )
+    }) {
+        Ok(stats) => {
+            tracing::info!(
+                op_id,
+                op = "recommend_batch_item",
+                item_index = index,
+                region = %region,
+                algorithm = alg.as_deref().unwrap_or(""),
+                timeout_ms,
+                wait_ms = elapsed_ms(stats.lock_elapsed),
+                elapsed_ms = elapsed_ms(stats.engine_elapsed),
+                response_bytes = stats.value.len(),
+                "Batch recommendation item completed"
+            );
+            (
+                index,
+                BatchRecommendResponseItem {
+                    alg,
+                    cost_time: stats.engine_elapsed.as_secs_f64(),
+                    wait_time: stats.lock_elapsed.as_secs_f64(),
+                    result: Some(stats.value),
+                    error: None,
+                },
+            )
+        }
+        Err(AppError::Engine(err)) => {
+            tracing::warn!(
+                op_id,
+                op = "recommend_batch_item",
+                item_index = index,
+                region = %region,
+                algorithm = alg.as_deref().unwrap_or(""),
+                timeout_ms,
+                error = %err,
+                "Batch deck recommendation failed"
+            );
+            (
+                index,
+                BatchRecommendResponseItem {
+                    alg,
+                    cost_time: 0.0,
+                    wait_time: 0.0,
+                    result: None,
+                    error: Some(err),
+                },
+            )
+        }
+        Err(AppError::Timeout(err)) => {
+            tracing::warn!(
+                op_id,
+                op = "recommend_batch_item",
+                item_index = index,
+                region = %region,
+                algorithm = alg.as_deref().unwrap_or(""),
+                timeout_ms,
+                error = %err,
+                "Batch deck recommendation timed out"
+            );
+            (
+                index,
+                BatchRecommendResponseItem {
+                    alg,
+                    cost_time: 0.0,
+                    wait_time: 0.0,
+                    result: None,
+                    error: Some(err),
+                },
+            )
+        }
+        Err(err) => (
+            index,
+            BatchRecommendResponseItem {
+                alg,
+                cost_time: 0.0,
+                wait_time: 0.0,
+                result: None,
+                error: Some(err.to_string()),
+            },
+        ),
+    }
+}
+
 fn request_content_type(headers: &HeaderMap) -> String {
     headers
         .get(CONTENT_TYPE)
@@ -532,16 +661,94 @@ fn expect_octet_stream_content_type(headers: &HeaderMap) -> Result<(), AppError>
     )))
 }
 
-fn parse_batch_recommend_request(body: &[u8]) -> Result<BatchRecommendRequest, AppError> {
+fn json_response(body: String) -> Result<Response, AppError> {
+    Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .map_err(|err| AppError::Engine(format!("failed to build JSON response: {err}")))
+}
+
+fn batch_recommend_response_json(items: &[BatchRecommendResponseItem]) -> Result<String, AppError> {
+    let mut out = String::with_capacity(
+        items
+            .iter()
+            .map(|item| item.result.as_ref().map_or(96, |result| result.len() + 96))
+            .sum::<usize>(),
+    );
+    out.push('[');
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('{');
+
+        let mut wrote_field = false;
+        if let Some(alg) = item.alg.as_deref() {
+            push_json_field_prefix(&mut out, &mut wrote_field, "alg")?;
+            push_json_string(&mut out, alg)?;
+        }
+
+        push_json_field_prefix(&mut out, &mut wrote_field, "cost_time")?;
+        push_json_f64(&mut out, item.cost_time)?;
+        push_json_field_prefix(&mut out, &mut wrote_field, "wait_time")?;
+        push_json_f64(&mut out, item.wait_time)?;
+
+        if let Some(result) = item.result.as_deref() {
+            push_json_field_prefix(&mut out, &mut wrote_field, "result")?;
+            out.push_str(result);
+        }
+        if let Some(error) = item.error.as_deref() {
+            push_json_field_prefix(&mut out, &mut wrote_field, "error")?;
+            push_json_string(&mut out, error)?;
+        }
+
+        out.push('}');
+    }
+    out.push(']');
+    Ok(out)
+}
+
+fn push_json_field_prefix(
+    out: &mut String,
+    wrote_field: &mut bool,
+    key: &str,
+) -> Result<(), AppError> {
+    if *wrote_field {
+        out.push(',');
+    } else {
+        *wrote_field = true;
+    }
+    push_json_string(out, key)?;
+    out.push(':');
+    Ok(())
+}
+
+fn push_json_string(out: &mut String, value: &str) -> Result<(), AppError> {
+    let encoded = sonic_rs::to_string(value)
+        .map_err(|err| AppError::Engine(format!("failed to encode JSON string: {err}")))?;
+    out.push_str(&encoded);
+    Ok(())
+}
+
+fn push_json_f64(out: &mut String, value: f64) -> Result<(), AppError> {
+    if !value.is_finite() {
+        return Err(AppError::Engine(format!(
+            "failed to encode non-finite JSON number: {value}"
+        )));
+    }
+    out.push_str(&value.to_string());
+    Ok(())
+}
+
+fn parse_single_decompressed_json_segment(body: &[u8], name: &str) -> Result<Vec<u8>, AppError> {
     let segments = extract_decompressed_segments(body)?;
     if segments.len() != 1 {
-        return Err(AppError::BadRequest(
-            "batch recommend payload expects exactly one JSON segment".into(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "{name} payload expects exactly one JSON segment"
+        )));
     }
 
-    sonic_rs::from_slice(&segments[0])
-        .map_err(|e| AppError::BadRequest(format!("invalid batch recommend payload: {e}")))
+    Ok(segments.into_iter().next().unwrap())
 }
 
 fn extract_decompressed_segments(body: &[u8]) -> Result<Vec<Vec<u8>>, AppError> {
@@ -586,35 +793,6 @@ fn extract_decompressed_segments(body: &[u8]) -> Result<Vec<Vec<u8>>, AppError> 
     }
 
     Ok(segments)
-}
-
-fn inject_default_recommend_timeout(options: &mut DeckRecommendOptions, state: &AppState) {
-    if options.timeout_ms.is_some() {
-        return;
-    }
-    if let Some(timeout_ms) = state.debug.default_recommend_timeout_ms {
-        options.timeout_ms = Some(timeout_ms);
-        tracing::debug!(
-            default_timeout_ms = timeout_ms,
-            "Injected default recommend timeout"
-        );
-    }
-}
-
-fn inject_default_batch_timeout(
-    option: &mut crate::models::BatchRecommendOption,
-    state: &AppState,
-) {
-    if option.get("timeout_ms").is_some() {
-        return;
-    }
-    if let Some(timeout_ms) = state.debug.default_recommend_timeout_ms {
-        option.insert("timeout_ms".into(), json!(timeout_ms));
-        tracing::debug!(
-            default_timeout_ms = timeout_ms,
-            "Injected default batch recommend timeout"
-        );
-    }
 }
 
 fn normalize_userdata_hash(userdata_hash: Option<&str>) -> Option<String> {
@@ -839,25 +1017,4 @@ fn elapsed_ms(duration: std::time::Duration) -> f64 {
 
 fn truncate_head(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
-}
-
-fn summarize_support_deck_debug(result: &DeckRecommendResult) -> String {
-    let Some(first) = result.decks.first() else {
-        return "none".into();
-    };
-    let mut out = format!("rate={:.2}", first.support_deck_bonus_rate);
-    match &first.support_deck_cards {
-        Some(cards) if !cards.is_empty() => {
-            let items = cards
-                .iter()
-                .map(|card| format!("{}:{:.2}", card.card_id, card.bonus))
-                .collect::<Vec<_>>()
-                .join(",");
-            out.push_str(" cards=[");
-            out.push_str(&items);
-            out.push(']');
-        }
-        _ => out.push_str(" cards=[]"),
-    }
-    out
 }

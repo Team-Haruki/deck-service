@@ -22,7 +22,7 @@ The current upstream source is [Team-Haruki/sekai-deck-recommend-cpp](https://gi
 Axum handlers → bridge.rs (safe Rust) → ffi.rs (unsafe extern "C") → C bridge (cpp_bridge/) → C++ engine (_cpp_src/)
 ```
 
-All data crosses the FFI boundary as JSON strings (via `sonic_rs::to_string` / `sonic_rs::from_str` on the Rust side, `nlohmann::json` on the C++ side).
+All data crosses the FFI boundary as JSON strings (via `sonic_rs::to_string` / `sonic_rs::from_str` on the Rust side, `yyjson` on the C++ side).
 
 ## Module Structure (flat)
 

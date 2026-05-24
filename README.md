@@ -136,7 +136,7 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `12014c86a36b6aa7e9c08e4151d38dd035e3c8dd`;
+`master` at commit `07be43d2c99b13abcea4136447bfa94f2d9e29ab`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 
@@ -195,7 +195,10 @@ Content-Type: application/json
 | `fixed_cards` | `int[]` | Cards that must be in the deck |
 | `fixed_characters` | `int[]` | Characters that must be in the deck |
 | `forced_leader_character_id` | `int` | Force the leader card's character ID |
-| `target_bonus_list` | `int[]` | Target bonus card IDs/values passed through to the engine |
+| `target_bonus_list` | `int[]` | Optional exact bonus targets for `target: "bonus"` |
+| `custom_bonus_character_ids` | `int[]` | Optional custom mixed-event bonus character IDs |
+| `custom_bonus_attr` | `string` | Optional custom mixed-event bonus attribute |
+| `custom_bonus_character_support_units` | `object` | Optional virtual singer support-unit constraints keyed by character ID |
 | `skill_reference_choose_strategy` | `string` | Skill reference strategy passed through to the engine |
 | `keep_after_training_state` | `bool` | Keep cards' existing after-training state |
 | `multi_live_teammate_score_up` | `int` | Multi-live teammate score-up value |
@@ -303,6 +306,28 @@ For `application/octet-stream` endpoints, concatenate one or more segments as
 stream. `/cache_userdata` and batch `/recommend` currently expect exactly one
 segment.
 
+### World Bloom Support Cards
+
+```
+POST /world_bloom/support_cards
+{
+  "region": "jp",
+  "userdata_hash": "...",
+  "event_id": 123,
+  "world_bloom_character_id": 1,
+  "support_master_max": true,
+  "support_skill_max": true
+}
+```
+
+Response: JSON array of support cards sorted by support bonus descending:
+
+```json
+[
+  { "card_id": 123, "bonus": 12.5 }
+]
+```
+
 ### Update Masterdata (from directory)
 
 ```
@@ -406,7 +431,7 @@ deck-service/
 │   └── error.rs         # AppError → HTTP response mapping
 ├── cpp_bridge/
 │   ├── deck_recommend_c.h    # C API header
-│   └── deck_recommend_c.cpp  # C bridge implementation (nlohmann/json)
+│   └── deck_recommend_c.cpp  # C bridge implementation (yyjson)
 ├── build.rs             # Cargo glue for Zig-built C++ static library
 ├── build.zig            # Zig build file for the C++ bridge/engine archive
 ├── cpp_sources.txt      # C++ engine source list shared by build tooling

@@ -17,6 +17,12 @@ unsafe extern "C" {
         json_map: *const c_char,
         region: *const c_char,
     ) -> *const c_char;
+    pub fn deck_recommend_update_masterdata_from_json_n(
+        handle: DeckRecommendHandle,
+        json_map: *const c_char,
+        json_map_len: usize,
+        region: *const c_char,
+    ) -> *const c_char;
     pub fn deck_recommend_update_musicmetas(
         handle: DeckRecommendHandle,
         file_path: *const c_char,
@@ -27,20 +33,93 @@ unsafe extern "C" {
         json_str: *const c_char,
         region: *const c_char,
     ) -> *const c_char;
+    pub fn deck_recommend_update_musicmetas_from_string_n(
+        handle: DeckRecommendHandle,
+        json_str: *const c_char,
+        json_str_len: usize,
+        region: *const c_char,
+    ) -> *const c_char;
     pub fn deck_recommend_cache_userdata(
         handle: DeckRecommendHandle,
         userdata_json: *const c_char,
         hash_out: *mut *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_cache_userdata_n(
+        handle: DeckRecommendHandle,
+        userdata_json: *const c_char,
+        userdata_json_len: usize,
+        hash_out: *mut *const c_char,
+        hash_len_out: *mut usize,
     ) -> *const c_char;
     pub fn deck_recommend_recommend(
         handle: DeckRecommendHandle,
         options_json: *const c_char,
         error_out: *mut *const c_char,
     ) -> *const c_char;
+    pub fn deck_recommend_recommend_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
+    ) -> *const c_char;
+    pub fn deck_recommend_recommend_with_default_timeout(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        default_timeout_ms: std::os::raw::c_int,
+        error_out: *mut *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_recommend_with_default_timeout_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        default_timeout_ms: std::os::raw::c_int,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
+    ) -> *const c_char;
+    pub fn deck_recommend_recommend_with_context(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        forced_region: *const c_char,
+        forced_userdata_hash: *const c_char,
+        default_timeout_ms: std::os::raw::c_int,
+        error_out: *mut *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_recommend_with_context_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        forced_region: *const c_char,
+        forced_region_len: usize,
+        forced_userdata_hash: *const c_char,
+        forced_userdata_hash_len: usize,
+        default_timeout_ms: std::os::raw::c_int,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
+    ) -> *const c_char;
     pub fn deck_recommend_calculate(
         handle: DeckRecommendHandle,
         options_json: *const c_char,
         error_out: *mut *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_calculate_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
+    ) -> *const c_char;
+    pub fn deck_recommend_get_world_bloom_support_cards(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        error_out: *mut *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_get_world_bloom_support_cards_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
     ) -> *const c_char;
     pub fn deck_recommend_free_string(str_ptr: *const c_char);
 }

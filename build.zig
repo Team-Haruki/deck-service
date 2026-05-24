@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     });
 
     root_module.addIncludePath(root_path.path(b, "src"));
-    root_module.addIncludePath(root_path.path(b, "3rdparty/json/single_include"));
+    root_module.addIncludePath(root_path.path(b, "3rdparty/yyjson/src"));
     root_module.addIncludePath(b.path("cpp_bridge"));
     for (libstdcpp_includes) |include_path| {
         root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
@@ -62,6 +62,15 @@ pub fn build(b: *std.Build) void {
         .root = root_path.path(b, "src"),
         .files = loadCppSources(b),
         .flags = cpp_flags,
+    });
+
+    root_module.addCSourceFiles(.{
+        .root = root_path.path(b, "3rdparty/yyjson/src"),
+        .files = &.{"yyjson.c"},
+        .flags = &[_][]const u8{
+            "-O2",
+            "-fno-sanitize=all",
+        },
     });
 
     root_module.addCSourceFiles(.{

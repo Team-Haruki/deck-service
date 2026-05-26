@@ -1,4 +1,5 @@
 area-item-information/area-item-service.cpp
+area-item-recommend/area-item-recommend.cpp
 card-information/card-calculator.cpp
 card-information/card-power-calculator.cpp
 card-information/card-service.cpp
@@ -25,6 +26,8 @@ event-point/card-bloom-event-calculator.cpp
 event-point/card-event-calculator.cpp
 event-point/event-calculator.cpp
 event-point/event-service.cpp
+live-score/live-exact-calculator.cpp
 live-score/live-calculator.cpp
+music-recommend/music-recommend.cpp
 mysekai-information/mysekai-event-calculator.cpp
 mysekai-information/mysekai-service.cpp

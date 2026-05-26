@@ -264,6 +264,11 @@ pub struct RecommendCard {
 pub struct RecommendSupportDeckCard {
     pub card_id: i32,
     pub bonus: f64,
+    pub skill_level: i32,
+    pub master_rank: i32,
+    pub level: i32,
+    pub after_training: bool,
+    pub default_image: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

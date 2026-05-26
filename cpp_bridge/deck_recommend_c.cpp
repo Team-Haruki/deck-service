@@ -434,6 +434,11 @@ static yyjson_mut_val* recommend_deck_to_json(yyjson_mut_doc* doc, const Recomme
             yyjson_mut_val* scj = json_object(doc);
             json_add(doc, scj, "card_id", supportCard.cardId);
             json_add(doc, scj, "bonus", supportCard.supportDeckBonus.value_or(0.0));
+            json_add(doc, scj, "skill_level", supportCard.skillLevel);
+            json_add(doc, scj, "master_rank", supportCard.masterRank);
+            json_add(doc, scj, "level", supportCard.level);
+            json_add(doc, scj, "after_training", supportCard.afterTraining);
+            json_add(doc, scj, "default_image", mappedEnumToString(EnumMap::defaultImage, supportCard.defaultImage));
             json_array_append(support_cards_json, scj);
         }
         json_add_value(doc, dj, "support_deck_cards", support_cards_json);

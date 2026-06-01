@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
-use deck_service::masterdata::resolve_masterdata_base_dir;
+use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
 
 #[tokio::main]
@@ -55,6 +56,7 @@ async fn main() {
 
     preload_masterdata(state.as_ref());
     preload_musicmetas(state.as_ref());
+    start_masterdata_refresh(Arc::clone(&state));
 
     tracing::info!(
         lock_warn_ms = lock_warn_threshold.as_millis() as u64,
@@ -181,75 +183,173 @@ fn preload_masterdata(state: &AppState) {
     let regions = env_csv("DECK_MASTERDATA_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
 
     for region in regions {
-        let resolved_base_dir = resolve_masterdata_base_dir(&requested_base_dir, &region);
-        if resolved_base_dir.trim().is_empty() {
-            tracing::warn!(
-                region = %region,
-                requested_base_dir = %requested_base_dir,
-                "Skipping masterdata preload because no directory was resolved"
-            );
-            continue;
-        }
-        if !Path::new(&resolved_base_dir)
-            .join("areaItemLevels.json")
-            .is_file()
-        {
-            tracing::warn!(
-                region = %region,
-                requested_base_dir = %requested_base_dir,
-                resolved_base_dir = %resolved_base_dir,
-                "Skipping masterdata preload because the directory does not contain masterdata files"
-            );
-            continue;
-        }
+        update_masterdata_region(state, &requested_base_dir, &region, "preload");
+    }
+}
 
-        tracing::info!(
-            region = %region,
-            requested_base_dir = %requested_base_dir,
-            resolved_base_dir = %resolved_base_dir,
-            "Preloading deck-service masterdata"
-        );
+fn start_masterdata_refresh(state: Arc<AppState>) {
+    let interval = env_duration_ms("DECK_MASTERDATA_REFRESH_MS", 300_000);
+    if interval.is_zero() {
+        tracing::info!("Deck-service masterdata refresh loop disabled");
+        return;
+    }
 
-        let mut engines = match state.engines.checkout_all(state.debug.lock_timeout) {
-            Ok(engines) => engines,
-            Err(err) => {
-                tracing::error!(
+    let requested_base_dir = env::var("DECK_MASTERDATA_DIR")
+        .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
+        .unwrap_or_default();
+    let regions = env_csv("DECK_MASTERDATA_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
+    let mut known = HashMap::new();
+    for region in &regions {
+        if let Ok(Some(signature)) = masterdata_signature(&requested_base_dir, region) {
+            known.insert(region.clone(), signature);
+        }
+    }
+
+    tracing::info!(
+        refresh_ms = interval.as_millis() as u64,
+        regions = %regions.join(","),
+        "Deck-service masterdata refresh loop started"
+    );
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(interval);
+            refresh_masterdata_regions(state.as_ref(), &requested_base_dir, &regions, &mut known);
+        }
+    });
+}
+
+fn refresh_masterdata_regions(
+    state: &AppState,
+    requested_base_dir: &str,
+    regions: &[String],
+    known: &mut HashMap<String, MasterdataSignature>,
+) {
+    for region in regions {
+        let signature = match masterdata_signature(requested_base_dir, region) {
+            Ok(Some(signature)) => signature,
+            Ok(None) => {
+                tracing::warn!(
                     region = %region,
                     requested_base_dir = %requested_base_dir,
-                    resolved_base_dir = %resolved_base_dir,
-                    error = %err.timeout_message(),
-                    "Failed to lock engine pool for masterdata preload"
+                    "Skipping masterdata refresh because no directory was resolved"
+                );
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    region = %region,
+                    requested_base_dir = %requested_base_dir,
+                    error = %err,
+                    "Failed to check masterdata refresh signature"
                 );
                 continue;
             }
         };
 
-        let Some(engine) = engines.iter().next() else {
-            tracing::error!(
-                region = %region,
-                "Engine pool is empty; cannot preload masterdata"
-            );
-            continue;
-        };
-        if let Err(err) = engine.update_masterdata(&resolved_base_dir, &region) {
-            tracing::error!(
-                region = %region,
-                resolved_base_dir = %resolved_base_dir,
-                error = %err,
-                "Failed to preload deck-service masterdata"
-            );
+        if known
+            .get(region)
+            .is_some_and(|previous| previous.hash == signature.hash)
+        {
             continue;
         }
 
-        engines.clear_userdata_hashes();
-        state.userdata_cache.clear();
         tracing::info!(
             region = %region,
-            resolved_base_dir = %resolved_base_dir,
-            engine_count = engines.len(),
-            "Preloaded deck-service masterdata"
+            resolved_base_dir = %signature.base_dir,
+            file_count = signature.file_count,
+            "Detected deck-service masterdata update"
         );
+        if let Some(applied) =
+            update_masterdata_region(state, requested_base_dir, region, "refresh")
+        {
+            known.insert(region.clone(), applied);
+        }
     }
+}
+
+fn update_masterdata_region(
+    state: &AppState,
+    requested_base_dir: &str,
+    region: &str,
+    reason: &'static str,
+) -> Option<MasterdataSignature> {
+    let signature = match masterdata_signature(requested_base_dir, region) {
+        Ok(Some(signature)) => signature,
+        Ok(None) => {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                reason,
+                "Skipping masterdata update because no directory was resolved"
+            );
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                reason,
+                error = %err,
+                "Skipping masterdata update because signature check failed"
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(
+        region = %region,
+        requested_base_dir = %requested_base_dir,
+        resolved_base_dir = %signature.base_dir,
+        reason,
+        "Updating deck-service masterdata"
+    );
+
+    let mut engines = match state.engines.checkout_all(state.debug.lock_timeout) {
+        Ok(engines) => engines,
+        Err(err) => {
+            tracing::error!(
+                region = %region,
+                requested_base_dir = %requested_base_dir,
+                resolved_base_dir = %signature.base_dir,
+                reason,
+                error = %err.timeout_message(),
+                "Failed to lock engine pool for masterdata update"
+            );
+            return None;
+        }
+    };
+
+    let Some(engine) = engines.iter().next() else {
+        tracing::error!(
+            region = %region,
+            reason,
+            "Engine pool is empty; cannot update masterdata"
+        );
+        return None;
+    };
+    if let Err(err) = engine.update_masterdata(&signature.base_dir, region) {
+        tracing::error!(
+            region = %region,
+            resolved_base_dir = %signature.base_dir,
+            reason,
+            error = %err,
+            "Failed to update deck-service masterdata"
+        );
+        return None;
+    }
+
+    engines.clear_userdata_hashes();
+    state.userdata_cache.clear();
+    tracing::info!(
+        region = %region,
+        resolved_base_dir = %signature.base_dir,
+        engine_count = engines.len(),
+        file_count = signature.file_count,
+        reason,
+        "Updated deck-service masterdata"
+    );
+    Some(signature)
 }
 
 fn preload_musicmetas(state: &AppState) {

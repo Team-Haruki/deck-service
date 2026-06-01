@@ -84,6 +84,9 @@ export DECK_DATA_DIR=/path/to/_cpp_src/data
 # Optional: preload region masterdata at startup
 export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
 
+# Optional: poll mounted masterdata for changes (ms, default: 300000; 0 disables)
+export DECK_MASTERDATA_REFRESH_MS=300000
+
 # Optional: preload music metas at startup
 export DECK_MUSICMETAS_BASE_DIR=/path/to/music-metas-root
 

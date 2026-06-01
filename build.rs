@@ -70,6 +70,10 @@ fn is_native_linux_gnu(host: &str, target: &str) -> bool {
     host == target && use_libstdcpp(target)
 }
 
+fn is_native_apple_darwin(host: &str, target: &str) -> bool {
+    host == target && target.contains("apple-darwin")
+}
+
 fn env_tool(var: &str, default: &str) -> String {
     env::var(var).unwrap_or_else(|_| default.to_owned())
 }
@@ -311,14 +315,13 @@ fn run_direct_zig_tools(
     let lib_path = static_lib_path(&lib_dir);
     let _ = fs::remove_file(&lib_path);
 
-    let mut archive = Command::new("zig");
-    archive.arg("ar");
-    archive.arg("cq").arg(&lib_path);
+    let archiver = env_tool("AR", "ar");
+    let mut archive = Command::new(&archiver);
+    archive.arg("rcs").arg(&lib_path);
     archive.args(objects.iter().map(PathBuf::as_path));
     run_checked(&mut archive, "archive direct Zig-built C++ objects");
 
-    let mut index = Command::new("zig");
-    index.arg("ar");
+    let mut index = Command::new(&archiver);
     index.arg("s").arg(&lib_path);
     run_checked(&mut index, "index direct Zig-built C++ archive");
 
@@ -423,7 +426,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
     let _ = fs::remove_file(&lib_path);
 
     let mut archive = Command::new(&archiver);
-    archive.arg("cq").arg(&lib_path);
+    archive.arg("rcs").arg(&lib_path);
     archive.args(objects.iter().map(PathBuf::as_path));
     run_checked(&mut archive, "archive native C++ objects");
 
@@ -487,6 +490,7 @@ fn main() {
     let zig_target = zig_target_for(&target);
     let use_libstdcpp = use_libstdcpp(&target);
     let native_linux_gnu = is_native_linux_gnu(&host, &target);
+    let native_apple_darwin = is_native_apple_darwin(&host, &target);
     let libstdcpp_include_dirs = if use_libstdcpp && !native_linux_gnu {
         discover_libstdcpp_include_dirs()
     } else {
@@ -499,10 +503,10 @@ fn main() {
     );
     emit_rerun_metadata(root, &cpp_root);
 
-    let lib_dir = if host.contains("apple-darwin") {
-        run_direct_zig_tools(root, &cpp_root, &out_dir, zig_target, use_libstdcpp)
-    } else if native_linux_gnu {
+    let lib_dir = if native_linux_gnu || native_apple_darwin {
         run_native_cpp_tools(root, &cpp_root, &out_dir)
+    } else if host.contains("apple-darwin") {
+        run_direct_zig_tools(root, &cpp_root, &out_dir, zig_target, use_libstdcpp)
     } else {
         match run_zig_build(
             root,

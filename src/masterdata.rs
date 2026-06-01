@@ -1,4 +1,15 @@
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MasterdataSignature {
+    pub base_dir: String,
+    pub hash: u64,
+    pub file_count: usize,
+}
 
 pub fn resolve_masterdata_base_dir(base_dir: &str, region: &str) -> String {
     let trimmed_region = region.trim();
@@ -83,4 +94,71 @@ fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
 
 fn has_masterdata_marker(path: &Path) -> bool {
     path.join("areaItemLevels.json").is_file()
+}
+
+pub fn masterdata_signature(
+    base_dir: &str,
+    region: &str,
+) -> std::io::Result<Option<MasterdataSignature>> {
+    let resolved_base_dir = resolve_masterdata_base_dir(base_dir, region);
+    let resolved_path = PathBuf::from(resolved_base_dir.trim());
+    if resolved_path.as_os_str().is_empty() || !has_masterdata_marker(&resolved_path) {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    collect_json_file_signatures(&resolved_path, &resolved_path, &mut entries)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    entries.sort();
+
+    let mut hasher = DefaultHasher::new();
+    entries.hash(&mut hasher);
+    Ok(Some(MasterdataSignature {
+        base_dir: resolved_path.to_string_lossy().into_owned(),
+        hash: hasher.finish(),
+        file_count: entries.len(),
+    }))
+}
+
+fn collect_json_file_signatures(
+    root: &Path,
+    dir: &Path,
+    entries: &mut Vec<(String, u64, u128)>,
+) -> std::io::Result<()> {
+    let mut children = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.path());
+
+    for child in children {
+        let path = child.path();
+        let file_type = child.file_type()?;
+        if file_type.is_dir() {
+            if child.file_name().to_string_lossy() == ".git" {
+                continue;
+            }
+            collect_json_file_signatures(root, &path, entries)?;
+            continue;
+        }
+        if !file_type.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let metadata = child.metadata()?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        entries.push((relative, metadata.len(), modified));
+    }
+
+    Ok(())
 }

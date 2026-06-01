@@ -531,6 +531,45 @@ SharedRegionDataStore& shared_region_data_store() {
     static SharedRegionDataStore instance;
     return instance;
 }
+
+class SharedUserdataStore {
+    mutable std::shared_mutex mutex_;
+    std::unordered_map<std::string, std::shared_ptr<const UserData>> entries_;
+    std::deque<std::string> order_;
+
+    static constexpr std::size_t max_entries = 64;
+
+public:
+    void remember(const std::string& userdata_hash, const std::shared_ptr<UserData>& userdata) {
+        auto snapshot = std::make_shared<const UserData>(*userdata);
+
+        std::unique_lock lock(mutex_);
+        if (!entries_.count(userdata_hash)) {
+            order_.push_back(userdata_hash);
+        }
+        entries_[userdata_hash] = std::move(snapshot);
+
+        while (order_.size() > max_entries) {
+            auto oldest = order_.front();
+            order_.pop_front();
+            entries_.erase(oldest);
+        }
+    }
+
+    std::shared_ptr<UserData> clone(const std::string& userdata_hash) const {
+        std::shared_lock lock(mutex_);
+        auto it = entries_.find(userdata_hash);
+        if (it == entries_.end()) {
+            return nullptr;
+        }
+        return std::make_shared<UserData>(*it->second);
+    }
+};
+
+SharedUserdataStore& shared_userdata_store() {
+    static SharedUserdataStore instance;
+    return instance;
+}
 }
 
 // ---- internal SekaiDeckRecommend wrapper (same logic as pybind11/wasm versions) ----
@@ -543,7 +582,8 @@ class SekaiDeckRecommendC {
 
     void remember_userdata(
         const std::string& userdata_hash,
-        const std::shared_ptr<UserData>& userdata
+        const std::shared_ptr<UserData>& userdata,
+        bool share_with_process_cache = true
     ) {
         if (!userdata_cache.count(userdata_hash)) {
             userdata_cache_order.push_back(userdata_hash);
@@ -555,6 +595,19 @@ class SekaiDeckRecommendC {
             userdata_cache_order.pop_front();
             userdata_cache.erase(oldest);
         }
+
+        if (share_with_process_cache) {
+            shared_userdata_store().remember(userdata_hash, userdata);
+        }
+    }
+
+    std::shared_ptr<UserData> attach_shared_userdata(const std::string& userdata_hash) {
+        auto userdata = shared_userdata_store().clone(userdata_hash);
+        if (!userdata) {
+            throw std::invalid_argument("User data not found for userdata_hash: " + userdata_hash);
+        }
+        remember_userdata(userdata_hash, userdata, false);
+        return userdata;
     }
 
     std::shared_ptr<UserData> resolve_userdata(
@@ -566,7 +619,7 @@ class SekaiDeckRecommendC {
             std::string userdata_hash(forced_userdata_hash, forced_userdata_hash_len);
             auto it = userdata_cache.find(userdata_hash);
             if (it == userdata_cache.end()) {
-                throw std::invalid_argument("User data not found for userdata_hash: " + userdata_hash);
+                return attach_shared_userdata(userdata_hash);
             }
             return it->second;
         }
@@ -579,7 +632,7 @@ class SekaiDeckRecommendC {
             std::string userdata_hash = opts["userdata_hash"].get<std::string>();
             auto it = userdata_cache.find(userdata_hash);
             if (it == userdata_cache.end()) {
-                throw std::invalid_argument("User data not found for userdata_hash: " + userdata_hash);
+                return attach_shared_userdata(userdata_hash);
             }
             return it->second;
         }
@@ -850,6 +903,13 @@ public:
         auto userdata_hash = hash_userdata_payload(userdata_str);
         remember_userdata(userdata_hash, userdata);
         return userdata_hash;
+    }
+
+    void attach_cached_userdata(std::string_view userdata_hash_view) {
+        if (userdata_hash_view.empty()) {
+            throw std::invalid_argument("userdata_hash is required.");
+        }
+        attach_shared_userdata(std::string(userdata_hash_view));
     }
 
     std::string calculate(const json_view& opts) {
@@ -1629,6 +1689,32 @@ const char* deck_recommend_cache_userdata_n(
         } else if (hash_len_out) {
             *hash_len_out = userdata_hash.size();
         }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return alloc_error(e.what());
+    }
+}
+
+const char* deck_recommend_attach_cached_userdata(DeckRecommendHandle handle, const char* userdata_hash) {
+    return deck_recommend_attach_cached_userdata_n(
+        handle,
+        userdata_hash,
+        userdata_hash ? std::strlen(userdata_hash) : 0
+    );
+}
+
+const char* deck_recommend_attach_cached_userdata_n(
+    DeckRecommendHandle handle,
+    const char* userdata_hash,
+    size_t userdata_hash_len
+) {
+    try {
+        if (!userdata_hash || userdata_hash_len == 0) {
+            throw std::invalid_argument("userdata_hash is required.");
+        }
+        static_cast<SekaiDeckRecommendC*>(handle)->attach_cached_userdata(
+            std::string_view(userdata_hash, userdata_hash_len)
+        );
         return nullptr;
     } catch (const std::exception& e) {
         return alloc_error(e.what());

@@ -59,6 +59,12 @@ const char* deck_recommend_cache_userdata_n(
     const char** hash_out,
     size_t* hash_len_out
 );
+const char* deck_recommend_attach_cached_userdata(DeckRecommendHandle handle, const char* userdata_hash);
+const char* deck_recommend_attach_cached_userdata_n(
+    DeckRecommendHandle handle,
+    const char* userdata_hash,
+    size_t userdata_hash_len
+);
 
 // Run deck recommendation. options_json is the full options as a JSON string.
 // Returns a JSON string with the result (caller must free), or NULL on failure.

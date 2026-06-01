@@ -827,6 +827,20 @@ fn ensure_userdata_hash(
         return Ok(());
     }
 
+    match engine.attach_cached_userdata(userdata_hash) {
+        Ok(()) => {
+            engine.remember_userdata_hash(userdata_hash);
+            return Ok(());
+        }
+        Err(err) => {
+            tracing::debug!(
+                hash_prefix = %truncate_head(userdata_hash, 8),
+                error = %err,
+                "Shared userdata cache attach missed; falling back to parsing payload"
+            );
+        }
+    }
+
     let cached_hash = engine.cache_userdata(userdata_payload)?;
     if cached_hash != userdata_hash.trim() {
         engine.forget_userdata_hash(userdata_hash);

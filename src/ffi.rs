@@ -51,6 +51,15 @@ unsafe extern "C" {
         hash_out: *mut *const c_char,
         hash_len_out: *mut usize,
     ) -> *const c_char;
+    pub fn deck_recommend_attach_cached_userdata(
+        handle: DeckRecommendHandle,
+        userdata_hash: *const c_char,
+    ) -> *const c_char;
+    pub fn deck_recommend_attach_cached_userdata_n(
+        handle: DeckRecommendHandle,
+        userdata_hash: *const c_char,
+        userdata_hash_len: usize,
+    ) -> *const c_char;
     pub fn deck_recommend_recommend(
         handle: DeckRecommendHandle,
         options_json: *const c_char,

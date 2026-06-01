@@ -208,6 +208,31 @@ impl DeckRecommend {
         Ok(hash)
     }
 
+    pub fn attach_cached_userdata(&self, userdata_hash: &str) -> Result<(), String> {
+        let started = Instant::now();
+        let hash = userdata_hash.trim();
+        tracing::debug!(
+            hash_prefix = %hash.chars().take(8).collect::<String>(),
+            "ffi attach_cached_userdata start"
+        );
+        let err = unsafe {
+            ffi::deck_recommend_attach_cached_userdata_n(
+                self.handle,
+                hash.as_ptr().cast(),
+                hash.len(),
+            )
+        };
+        let result = unsafe { ffi::check_error(err) };
+        if result.is_ok() {
+            tracing::debug!(
+                hash_prefix = %hash.chars().take(8).collect::<String>(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "ffi attach_cached_userdata completed"
+            );
+        }
+        result
+    }
+
     /// Run deck recommendation with a JSON options object.
     /// Returns the raw JSON result string.
     pub fn recommend_raw(&self, options_json: &str) -> Result<String, String> {

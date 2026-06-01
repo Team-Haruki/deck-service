@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: deck-service
+  DECK_CPP_REPO: https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
+  DECK_CPP_BRANCH: master
+  DECK_CPP_REF: 42e7c54a1695b2f9055311fb09e3e8559f42421e
 
 jobs:
   build:
@@ -31,14 +34,17 @@ jobs:
           - os: macos-latest
             name: macos-arm64
             archive: tar.gz
-          - os: windows-latest
-            name: windows-x64
-            archive: zip
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Prepare C++ engine source
+        run: |
+          git clone --branch "$DECK_CPP_BRANCH" --single-branch "$DECK_CPP_REPO" _cpp_src
+          git -C _cpp_src checkout "$DECK_CPP_REF"
+          git -C _cpp_src submodule update --init --recursive
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -50,19 +56,10 @@ jobs:
         run: cargo build --release --locked
 
       - name: Package archive (Unix)
-        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp "target/release/${{ env.BINARY_NAME }}" "dist/${{ env.BINARY_NAME }}"
           tar -czf "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz" -C dist "${{ env.BINARY_NAME }}"
-
-      - name: Package archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/${{ env.BINARY_NAME }}.exe"
-          Compress-Archive -Path "dist/${{ env.BINARY_NAME }}.exe" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7

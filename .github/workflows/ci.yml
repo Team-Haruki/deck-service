@@ -16,6 +16,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  DECK_CPP_REPO: https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
+  DECK_CPP_BRANCH: master
+  DECK_CPP_REF: 42e7c54a1695b2f9055311fb09e3e8559f42421e
 
 jobs:
   rust:
@@ -24,6 +27,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Prepare C++ engine source
+        run: |
+          git clone --branch "$DECK_CPP_BRANCH" --single-branch "$DECK_CPP_REPO" _cpp_src
+          git -C _cpp_src checkout "$DECK_CPP_REF"
+          git -C _cpp_src submodule update --init --recursive
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

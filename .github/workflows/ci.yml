@@ -18,7 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   DECK_CPP_REPO: https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
   DECK_CPP_BRANCH: master
-  DECK_CPP_REF: 88b4e1beedbb99e094afce01d26d795fd20f01e5
+  DECK_CPP_REF: ef5d20b1ef00de22c1661fd703b2c70d5f5a77cd
 
 jobs:
   rust:

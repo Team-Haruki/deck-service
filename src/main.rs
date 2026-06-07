@@ -20,7 +20,10 @@ mod logging;
 #[tokio::main]
 async fn main() {
     logging::init();
-    tracing::info!("===== Deck Service v{} =====", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "========================= Deck Service v{} =========================",
+        env!("CARGO_PKG_VERSION")
+    );
     tracing::info!("Powered by Haruki Dev Team");
 
     // Initialize static data path (defaults to _cpp_src/data relative to the executable)

@@ -234,6 +234,8 @@ pub struct WorldBloomSupportOptions {
     pub support_master_max: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub support_skill_max: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_other_unit: Option<bool>,
 }
 
 // ---- Response types ----

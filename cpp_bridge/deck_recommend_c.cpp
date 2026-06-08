@@ -1511,6 +1511,7 @@ public:
 
         bool supportMasterMax = json_opt<bool>(opts, "support_master_max").value_or(false);
         bool supportSkillMax = json_opt<bool>(opts, "support_skill_max").value_or(false);
+        bool filterOtherUnit = json_opt<bool>(opts, "filter_other_unit").value_or(false);
 
         CardCalculator cardCalculator(dataProvider);
         std::vector<std::pair<int, double>> result;
@@ -1521,7 +1522,8 @@ public:
                 eventId,
                 characterId,
                 supportMasterMax,
-                supportSkillMax
+                supportSkillMax,
+                !filterOtherUnit
             );
             result.emplace_back(support_card.cardId, support_card.bonus);
         }

@@ -9,22 +9,20 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
 
 use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
 
-mod logging;
-
 #[tokio::main]
 async fn main() {
-    logging::init();
-    tracing::info!(
-        "========================= Deck Service v{} =========================",
-        env!("CARGO_PKG_VERSION")
-    );
-    tracing::info!("Powered by Haruki Dev Team");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("deck_service=info".parse().unwrap()),
+        )
+        .init();
 
     // Initialize static data path (defaults to _cpp_src/data relative to the executable)
     let data_dir = env::var("DECK_DATA_DIR").unwrap_or_else(|_| {

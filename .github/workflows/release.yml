@@ -18,7 +18,7 @@ env:
   BINARY_NAME: deck-service
   DECK_CPP_REPO: https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
   DECK_CPP_BRANCH: master
-  DECK_CPP_REF: a7424d22395b3dc4e20218a6bbffe6de60b28f16
+  DECK_CPP_REF: 026dfeaaa464c3a2d6d9c5eeab8d1971a909ed01
 
 jobs:
   build:

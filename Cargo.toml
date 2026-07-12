@@ -1,6 +1,6 @@
 [package]
 name = "deck-service"
-version = "0.4.16"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]

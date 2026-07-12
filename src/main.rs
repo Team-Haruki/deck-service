@@ -40,6 +40,22 @@ async fn main() {
     let default_recommend_timeout_ms = env_optional_i32("DECK_RECOMMEND_TIMEOUT_MS");
     let engine_pool_size =
         env_usize_at_least_one("DECK_ENGINE_POOL_SIZE").unwrap_or_else(default_engine_pool_size);
+    let available_parallelism = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let engine_thread_count = effective_engine_thread_count(
+        env::var("DECK_ENGINE_THREADS").ok().as_deref(),
+        available_parallelism,
+    );
+
+    if engine_pool_size.saturating_mul(engine_thread_count) > available_parallelism {
+        tracing::warn!(
+            engine_pool_size,
+            engine_thread_count,
+            available_parallelism,
+            "Configured engine pool and C++ thread counts may oversubscribe the CPU"
+        );
+    }
 
     let engines = EnginePool::new(engine_pool_size).expect("Failed to create DeckRecommend pool");
     let state = Arc::new(AppState {
@@ -50,6 +66,7 @@ async fn main() {
             lock_timeout,
             engine_warn_threshold,
             default_recommend_timeout_ms,
+            engine_thread_count,
         },
         userdata_cache: UserdataCache::default(),
     });
@@ -63,6 +80,8 @@ async fn main() {
         lock_timeout_ms = lock_timeout.as_millis() as u64,
         engine_warn_ms = engine_warn_threshold.as_millis() as u64,
         engine_pool_size = state.engines.size(),
+        engine_thread_count,
+        available_parallelism,
         default_recommend_timeout_ms = default_recommend_timeout_ms.unwrap_or_default(),
         "Initialized deck-service debug thresholds"
     );
@@ -174,6 +193,14 @@ fn default_engine_pool_size() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get().min(4))
         .unwrap_or(1)
+}
+
+fn effective_engine_thread_count(raw: Option<&str>, available_parallelism: usize) -> usize {
+    let requested = raw
+        .and_then(|value| value.trim().parse::<isize>().ok())
+        .unwrap_or(1)
+        .max(1) as usize;
+    requested.min(available_parallelism.max(1))
 }
 
 fn preload_masterdata(state: &AppState) {
@@ -481,5 +508,24 @@ fn env_csv(name: &str, default: &[&str]) -> Vec<String> {
             }
         }
         Err(_) => default.iter().map(|item| (*item).to_string()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_engine_thread_count;
+
+    #[test]
+    fn engine_threads_default_to_serial() {
+        assert_eq!(effective_engine_thread_count(None, 8), 1);
+        assert_eq!(effective_engine_thread_count(Some("invalid"), 8), 1);
+        assert_eq!(effective_engine_thread_count(Some("0"), 8), 1);
+    }
+
+    #[test]
+    fn engine_threads_are_clamped_to_available_parallelism() {
+        assert_eq!(effective_engine_thread_count(Some("4"), 8), 4);
+        assert_eq!(effective_engine_thread_count(Some("16"), 8), 8);
+        assert_eq!(effective_engine_thread_count(Some("4"), 0), 1);
     }
 }

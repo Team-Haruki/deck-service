@@ -296,6 +296,7 @@ pub struct RecommendDeck {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeckRecommendResult {
     pub decks: Vec<RecommendDeck>,
+    pub cost_ms: f64,
 }
 
 #[derive(Debug, Serialize)]

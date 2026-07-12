@@ -139,7 +139,7 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `07be43d2c99b13abcea4136447bfa94f2d9e29ab`;
+`master` at commit `b2387b7f09e5a420c9bfee9ece8903b345dd39cd`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 
@@ -302,6 +302,17 @@ Request body: zstd-compressed binary protocol with exactly one JSON segment:
 Response: JSON array of per-item results with `alg`, `cost_time`, `wait_time`,
 and either `result` or `error`.
 
+Successful `result` objects include `cost_ms`, the C++ search-algorithm wall
+time in milliseconds. It excludes option/userdata parsing and result
+conversion. The outer `cost_time` remains the complete per-item engine-call
+time in seconds for backward compatibility.
+
+Batch execution adapts to the configured concurrency model. With the default
+`DECK_ENGINE_THREADS=1`, items use separate instances from the Rust engine
+pool. When `DECK_ENGINE_THREADS` is greater than 1, the batch uses one engine
+checkout and the C++ engine's persistent worker pool, which prevents nested
+parallel regions from oversubscribing the CPU.
+
 ### Binary Protocol
 
 For `application/octet-stream` endpoints, concatenate one or more segments as
@@ -379,6 +390,7 @@ POST /update/musicmetas/string
 | `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring an engine pool slot |
 | `DECK_ENGINE_WARN_MS` | `10000` | Warn threshold for a single FFI/engine operation |
 | `DECK_ENGINE_POOL_SIZE` | `min(cpu_count, 4)` | Number of engine instances used for concurrent recommends |
+| `DECK_ENGINE_THREADS` | `1` | C++ engine-internal parallelism; keep `pool size × engine threads` within the available CPU count |
 | `DECK_RECOMMEND_TIMEOUT_MS` | unset | Default `timeout_ms` injected into recommend requests when missing |
 
 ## Debugging Hung Requests

@@ -324,6 +324,15 @@ struct BatchRecommendItemMeta {
     timeout_ms: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NativeBatchRecommendItem {
+    cost_time: f64,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 async fn recommend_legacy(
     state: Arc<AppState>,
     body: Bytes,
@@ -415,61 +424,98 @@ async fn recommend_batch(
     let item_count = batch_options.len();
     let worker_count = state.engines.size().min(item_count);
     let default_timeout_ms = state.debug.default_recommend_timeout_ms;
-    let results = tokio::task::block_in_place(|| {
-        std::thread::scope(|scope| {
-            let next_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let mut handles = Vec::with_capacity(worker_count);
-
-            for _ in 0..worker_count {
-                let state = Arc::clone(&state);
-                let region = &region;
-                let userdata_hash = &userdata_hash;
-                let userdata_payload = Arc::clone(&userdata_payload);
-                let batch_options = &batch_options;
-                let next_index = Arc::clone(&next_index);
-
-                handles.push(scope.spawn(move || {
-                    let mut items = Vec::new();
-                    loop {
-                        let index = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(option_json) = batch_options.get(index) else {
-                            break;
-                        };
-                        items.push(process_batch_recommend_item(
-                            state.as_ref(),
-                            op_id,
-                            index,
-                            region,
-                            userdata_hash,
-                            userdata_payload.as_ref(),
-                            option_json,
-                            default_timeout_ms,
-                        ));
-                    }
-                    items
-                }));
+    let results = if state.debug.engine_thread_count > 1 {
+        let mut options_json = String::with_capacity(
+            batch_options.iter().map(String::len).sum::<usize>() + item_count + 1,
+        );
+        options_json.push('[');
+        for (index, option) in batch_options.iter().enumerate() {
+            if index > 0 {
+                options_json.push(',');
             }
+            options_json.push_str(option);
+        }
+        options_json.push(']');
 
-            let mut results = std::iter::repeat_with(|| None)
-                .take(item_count)
-                .collect::<Vec<Option<BatchRecommendResponseItem>>>();
-            for handle in handles {
-                let items = handle
-                    .join()
-                    .map_err(|_| AppError::Engine("batch recommend worker panicked".into()))?;
-                for (index, item) in items {
-                    results[index] = Some(item);
+        let stats = tokio::task::block_in_place(|| {
+            run_engine_op_with_stats(state.as_ref(), op_id, "recommend_batch_native", |engine| {
+                ensure_userdata_hash(engine, &userdata_hash, userdata_payload.as_ref())?;
+                engine.recommend_batch_raw_with_context(
+                    &options_json,
+                    &region,
+                    &userdata_hash,
+                    default_timeout_ms,
+                )
+            })
+        })?;
+        tracing::info!(
+            op_id,
+            op = "recommend_batch_native",
+            wait_ms = elapsed_ms(stats.lock_elapsed),
+            elapsed_ms = elapsed_ms(stats.engine_elapsed),
+            item_count,
+            engine_thread_count = state.debug.engine_thread_count,
+            "Native batch recommendation completed"
+        );
+        merge_native_batch_results(&stats.value, &batch_options, stats.lock_elapsed)?
+    } else {
+        tokio::task::block_in_place(|| {
+            std::thread::scope(|scope| {
+                let next_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut handles = Vec::with_capacity(worker_count);
+
+                for _ in 0..worker_count {
+                    let state = Arc::clone(&state);
+                    let region = &region;
+                    let userdata_hash = &userdata_hash;
+                    let userdata_payload = Arc::clone(&userdata_payload);
+                    let batch_options = &batch_options;
+                    let next_index = Arc::clone(&next_index);
+
+                    handles.push(scope.spawn(move || {
+                        let mut items = Vec::new();
+                        loop {
+                            let index =
+                                next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(option_json) = batch_options.get(index) else {
+                                break;
+                            };
+                            items.push(process_batch_recommend_item(
+                                state.as_ref(),
+                                op_id,
+                                index,
+                                region,
+                                userdata_hash,
+                                userdata_payload.as_ref(),
+                                option_json,
+                                default_timeout_ms,
+                            ));
+                        }
+                        items
+                    }));
                 }
-            }
 
-            Ok::<_, AppError>(
-                results
-                    .into_iter()
-                    .map(|item| item.expect("batch recommend worker did not return a response"))
-                    .collect::<Vec<_>>(),
-            )
-        })
-    })?;
+                let mut results = std::iter::repeat_with(|| None)
+                    .take(item_count)
+                    .collect::<Vec<Option<BatchRecommendResponseItem>>>();
+                for handle in handles {
+                    let items = handle
+                        .join()
+                        .map_err(|_| AppError::Engine("batch recommend worker panicked".into()))?;
+                    for (index, item) in items {
+                        results[index] = Some(item);
+                    }
+                }
+
+                Ok::<_, AppError>(
+                    results
+                        .into_iter()
+                        .map(|item| item.expect("batch recommend worker did not return a response"))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })?
+    };
 
     tracing::info!(
         op_id,
@@ -706,6 +752,39 @@ fn batch_recommend_response_json(items: &[BatchRecommendResponseItem]) -> Result
     }
     out.push(']');
     Ok(out)
+}
+
+fn merge_native_batch_results(
+    native_json: &str,
+    batch_options: &[String],
+    wait_time: std::time::Duration,
+) -> Result<Vec<BatchRecommendResponseItem>, AppError> {
+    let native_items: Vec<NativeBatchRecommendItem> = sonic_rs::from_str(native_json)
+        .map_err(|err| AppError::Engine(format!("invalid native batch response: {err}")))?;
+    if native_items.len() != batch_options.len() {
+        return Err(AppError::Engine(format!(
+            "native batch returned {} items for {} requests",
+            native_items.len(),
+            batch_options.len()
+        )));
+    }
+
+    Ok(native_items
+        .into_iter()
+        .zip(batch_options)
+        .map(|(item, option_json)| {
+            let alg = sonic_rs::from_str::<BatchRecommendItemMeta>(option_json)
+                .ok()
+                .and_then(|meta| meta.algorithm);
+            BatchRecommendResponseItem {
+                alg,
+                cost_time: item.cost_time,
+                wait_time: wait_time.as_secs_f64(),
+                result: item.result,
+                error: item.error,
+            }
+        })
+        .collect())
 }
 
 fn push_json_field_prefix(
@@ -1031,4 +1110,45 @@ fn elapsed_ms(duration: std::time::Duration) -> f64 {
 
 fn truncate_head(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{batch_recommend_response_json, merge_native_batch_results};
+
+    #[test]
+    fn native_batch_results_preserve_item_success_and_error() {
+        let options = vec![
+            r#"{"algorithm":"dfs"}"#.to_string(),
+            r#"{"algorithm":"ga"}"#.to_string(),
+        ];
+        let native = r#"[
+            {"cost_time":0.125,"result":"{\"decks\":[]}"},
+            {"cost_time":0.25,"error":"invalid option"}
+        ]"#;
+
+        let items = merge_native_batch_results(native, &options, Duration::from_millis(10))
+            .expect("native batch response should parse");
+        let response =
+            batch_recommend_response_json(&items).expect("merged batch response should serialize");
+
+        assert!(response.contains(r#""alg":"dfs""#));
+        assert!(response.contains(r#""result":{"decks":[]}"#));
+        assert!(response.contains(r#""alg":"ga""#));
+        assert!(response.contains(r#""error":"invalid option""#));
+        assert!(response.contains(r#""wait_time":0.01"#));
+    }
+
+    #[test]
+    fn native_batch_results_reject_wrong_item_count() {
+        let error = merge_native_batch_results("[]", &["{}".to_string()], Duration::ZERO)
+            .expect_err("wrong item count should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("returned 0 items for 1 requests")
+        );
+    }
 }

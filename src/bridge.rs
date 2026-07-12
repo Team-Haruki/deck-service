@@ -339,6 +339,66 @@ impl DeckRecommend {
         Ok(result)
     }
 
+    /// Run multiple recommendation option objects in one C++ engine call.
+    /// The returned JSON array contains per-item result/error and timing fields.
+    pub fn recommend_batch_raw_with_context(
+        &self,
+        options_json: &str,
+        forced_region: &str,
+        forced_userdata_hash: &str,
+        default_timeout_ms: Option<i32>,
+    ) -> Result<String, String> {
+        let started = Instant::now();
+        tracing::debug!(
+            options_bytes = options_json.len(),
+            forced_region,
+            hash_prefix = %forced_userdata_hash.chars().take(8).collect::<String>(),
+            default_timeout_ms = default_timeout_ms.unwrap_or_default(),
+            "ffi batch recommend start"
+        );
+        let mut error_out: *const std::os::raw::c_char = std::ptr::null();
+        let mut result_len = 0usize;
+
+        let result_ptr = unsafe {
+            ffi::deck_recommend_recommend_batch_with_context_n(
+                self.handle,
+                options_json.as_ptr().cast(),
+                options_json.len(),
+                forced_region.as_ptr().cast(),
+                forced_region.len(),
+                forced_userdata_hash.as_ptr().cast(),
+                forced_userdata_hash.len(),
+                default_timeout_ms.unwrap_or_default(),
+                &mut error_out,
+                &mut result_len,
+            )
+        };
+
+        if result_ptr.is_null() {
+            if !error_out.is_null() {
+                let msg = unsafe { CStr::from_ptr(error_out) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { ffi::deck_recommend_free_string(error_out) };
+                tracing::debug!(
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    error = %msg,
+                    "ffi batch recommend returned error"
+                );
+                return Err(msg);
+            }
+            return Err("Unknown error during batch recommendation".into());
+        }
+
+        let result = FfiString::from_ptr_len(result_ptr, result_len).into_string()?;
+        tracing::debug!(
+            result_bytes = result.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "ffi batch recommend completed"
+        );
+        Ok(result)
+    }
+
     /// Run deck recommendation with any serializable payload.
     pub fn recommend_value<T: Serialize>(
         &self,

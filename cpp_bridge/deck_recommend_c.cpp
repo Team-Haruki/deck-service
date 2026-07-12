@@ -16,8 +16,10 @@
 #include "deck-information/deck-calculator.h"
 #include "deck-information/deck-service.h"
 #include "live-score/live-calculator.h"
+#include "common/parallel-utils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1133,7 +1135,8 @@ public:
         apply_custom_bonus_options(config, opts);
 
         // algorithm
-        std::string algorithm = json_opt<std::string>(opts, "algorithm").value_or("ga");
+        std::string algorithm = json_opt<std::string>(opts, "algorithm")
+            .value_or(is_challenge ? "dfs" : "ga");
         if (!VALID_ALGORITHMS.count(algorithm)) {
             throw std::invalid_argument("Invalid algorithm: " + algorithm);
         }
@@ -1413,6 +1416,9 @@ public:
         }
 
         // --- execute recommendation ---
+        // Match the upstream bindings: cost_ms measures only the search
+        // algorithm, excluding option/userdata parsing and result conversion.
+        auto search_started = std::chrono::steady_clock::now();
         std::vector<RecommendDeck> result;
 
         if (config.target == RecommendTarget::Mysekai) {
@@ -1425,6 +1431,9 @@ public:
             EventDeckRecommend rec(dp);
             result = rec.recommendEventDeck(eventId, liveType, config, worldBloomCharId);
         }
+        double cost_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - search_started
+        ).count();
 
         MutableJsonDoc out_doc;
         yyjson_mut_val* result_json = json_object(out_doc.get());
@@ -1433,7 +1442,86 @@ public:
             json_array_append(decks_json, recommend_deck_to_json(out_doc.get(), deck));
         }
         json_add_value(out_doc.get(), result_json, "decks", decks_json);
+        json_add(out_doc.get(), result_json, "cost_ms", cost_ms);
         return dump_mutable_json(result_json);
+    }
+
+    std::string recommend_batch(
+        const json_view& options_list,
+        int default_timeout_ms,
+        const char* forced_region,
+        const char* forced_userdata_hash,
+        size_t forced_region_len,
+        size_t forced_userdata_hash_len
+    ) {
+        if (!options_list.is_array()) {
+            throw std::invalid_argument("batch recommend options must be an array.");
+        }
+        if (!forced_region || forced_region_len == 0) {
+            throw std::invalid_argument("region is required for batch recommend.");
+        }
+        if (!forced_userdata_hash || forced_userdata_hash_len == 0) {
+            throw std::invalid_argument("userdata_hash is required for batch recommend.");
+        }
+
+        // Resolve the shared userdata before entering the parallel region so every
+        // worker only reads the handle-local cache.
+        std::string userdata_hash(forced_userdata_hash, forced_userdata_hash_len);
+        if (!userdata_cache.count(userdata_hash)) {
+            attach_shared_userdata(userdata_hash);
+        }
+
+        std::vector<json_view> options;
+        options.reserve(options_list.size());
+        for (const auto& option : options_list) {
+            if (!option.is_object()) {
+                throw std::invalid_argument("batch recommend options entries must be objects.");
+            }
+            options.push_back(option);
+        }
+
+        struct BatchItem {
+            std::string result;
+            std::string error;
+            double cost_time = 0.0;
+        };
+        std::vector<BatchItem> items(options.size());
+
+        parallelFor(options.size(), [&](std::size_t index) {
+            auto started = std::chrono::steady_clock::now();
+            try {
+                items[index].result = recommend(
+                    options[index],
+                    default_timeout_ms,
+                    forced_region,
+                    forced_userdata_hash,
+                    forced_region_len,
+                    forced_userdata_hash_len
+                );
+            } catch (const std::exception& e) {
+                items[index].error = e.what();
+            } catch (...) {
+                items[index].error = "Unknown error during batch recommendation";
+            }
+            items[index].cost_time = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+        }, 1);
+
+        MutableJsonDoc out_doc;
+        yyjson_mut_val* result_array = json_array(out_doc.get());
+        for (const auto& item : items) {
+            yyjson_mut_val* item_json = json_object(out_doc.get());
+            json_add(out_doc.get(), item_json, "cost_time", item.cost_time);
+            if (!item.result.empty()) {
+                json_add(out_doc.get(), item_json, "result", item.result);
+            }
+            if (!item.error.empty()) {
+                json_add(out_doc.get(), item_json, "error", item.error);
+            }
+            json_array_append(result_array, item_json);
+        }
+        return dump_mutable_json(result_array);
     }
 
     std::string get_world_bloom_support_cards(const json_view& opts) {
@@ -1831,6 +1919,37 @@ const char* deck_recommend_recommend_with_context_n(
         }
         auto doc = parse_json_bytes(options_json, options_json_len, "recommend options");
         auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend(
+            doc.root(),
+            default_timeout_ms,
+            forced_region,
+            forced_userdata_hash,
+            forced_region_len,
+            forced_userdata_hash_len
+        );
+        return alloc_cstr(result, result_len_out);
+    } catch (const std::exception& e) {
+        if (error_out) {
+            *error_out = alloc_error(e.what());
+        }
+        return nullptr;
+    }
+}
+
+const char* deck_recommend_recommend_batch_with_context_n(
+    DeckRecommendHandle handle,
+    const char* options_json,
+    size_t options_json_len,
+    const char* forced_region,
+    size_t forced_region_len,
+    const char* forced_userdata_hash,
+    size_t forced_userdata_hash_len,
+    int default_timeout_ms,
+    const char** error_out,
+    size_t* result_len_out
+) {
+    try {
+        auto doc = parse_json_bytes(options_json, options_json_len, "batch recommend options");
+        auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend_batch(
             doc.root(),
             default_timeout_ms,
             forced_region,

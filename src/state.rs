@@ -13,6 +13,7 @@ pub struct DebugConfig {
     pub lock_timeout: Duration,
     pub engine_warn_threshold: Duration,
     pub default_recommend_timeout_ms: Option<i32>,
+    pub engine_thread_count: usize,
 }
 
 pub struct AppState {

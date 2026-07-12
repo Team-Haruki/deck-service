@@ -120,6 +120,22 @@ const char* deck_recommend_recommend_with_context_n(
     size_t* result_len_out
 );
 
+// Run a JSON array of recommendation options in one engine call. The forced
+// region and userdata hash are required and shared by every item. Returns a
+// JSON array whose entries contain cost_time and either result or error.
+const char* deck_recommend_recommend_batch_with_context_n(
+    DeckRecommendHandle handle,
+    const char* options_json,
+    size_t options_json_len,
+    const char* forced_region,
+    size_t forced_region_len,
+    const char* forced_userdata_hash,
+    size_t forced_userdata_hash_len,
+    int default_timeout_ms,
+    const char** error_out,
+    size_t* result_len_out
+);
+
 // Run fixed-deck calculations. options_json is the full options as a JSON string.
 // Supported modes: "deck", "challenge", "live_full".
 // Returns a JSON string with the result (caller must free), or NULL on failure.

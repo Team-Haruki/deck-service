@@ -106,6 +106,18 @@ unsafe extern "C" {
         error_out: *mut *const c_char,
         result_len_out: *mut usize,
     ) -> *const c_char;
+    pub fn deck_recommend_recommend_batch_with_context_n(
+        handle: DeckRecommendHandle,
+        options_json: *const c_char,
+        options_json_len: usize,
+        forced_region: *const c_char,
+        forced_region_len: usize,
+        forced_userdata_hash: *const c_char,
+        forced_userdata_hash_len: usize,
+        default_timeout_ms: std::os::raw::c_int,
+        error_out: *mut *const c_char,
+        result_len_out: *mut usize,
+    ) -> *const c_char;
     pub fn deck_recommend_calculate(
         handle: DeckRecommendHandle,
         options_json: *const c_char,

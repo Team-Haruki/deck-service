@@ -56,12 +56,18 @@ Userdata is cached server-side: clients call `/cache_userdata` first, then refer
 - `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` -- music metas directory for preloading on startup
 - `DECK_MUSICMETAS_REGIONS` -- CSV of music metas regions to preload (default: jp,en,cn,tw,kr)
 - `DECK_MUSICMETAS_FILE_<REGION>` -- explicit music metas file for one region
+- `DECK_MASTERDATA_REFRESH_MS` -- masterdata refresh watcher interval (default: 300000)
 - `DECK_ENGINE_POOL_SIZE` -- number of engine instances
+- `DECK_ENGINE_THREADS` -- C++ engine-internal thread count (default: 1); keep `pool size x engine threads` within the CPU count
 - `DECK_RECOMMEND_TIMEOUT_MS` -- default timeout injected when requests omit `timeout_ms`
+- `DECK_LOCK_WARN_MS` / `DECK_LOCK_TIMEOUT_MS` / `DECK_ENGINE_WARN_MS` -- pool wait warn threshold, pool acquire timeout, engine op warn threshold
+- `BIND_ADDR` -- HTTP listen address (default: 0.0.0.0:3000)
 
 ## Binary Protocol
 
 The `/cache_userdata` and batch `/recommend` endpoints accept `application/octet-stream` bodies: zstd-compressed, length-prefixed segments (4-byte big-endian length + payload per segment).
+
+Batch `/recommend` is adaptive: with `DECK_ENGINE_THREADS=1` items fan out across the Rust engine pool; with a value greater than 1 the whole batch goes through a single native C++ batch FFI call that parallelizes internally.
 
 ## Git commits
 
@@ -87,7 +93,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude (any model): `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 4.7`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -112,7 +118,7 @@ Use the standardized workflow layout in `.github/workflows`:
 Workflow maintenance rules:
 
 - Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Use `actions/checkout@v7`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
 - Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
 - Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
 - Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.

@@ -30,7 +30,8 @@ All Rust source files are directly in `src/` — no nested modules:
 
 | File | Responsibility |
 | --- | --- |
-| `main.rs` | Router setup, server entry point, env var handling, masterdata preloading |
+| `main.rs` | Router setup, server entry point, env var handling, masterdata/musicmetas preloading, masterdata refresh watcher |
+| `lib.rs` | Library facade re-exporting the modules below |
 | `handlers.rs` | Axum route handler functions |
 | `models.rs` | Serde request/response types (mirrors Python `.pyi` interface) |
 | `bridge.rs` | Safe wrapper around FFI (owns the C++ handle, implements `Drop`) |
@@ -46,7 +47,7 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Error handling**: Return `Result<_, AppError>` from handlers. `AppError::Engine(String)` for C++ errors, `AppError::BadRequest(String)` for input validation, `AppError::Timeout(String)` for pool timeouts.
 - **FFI safety**: `DeckRecommend` is `Send` but not `Sync`. Concurrent access goes through `EnginePool`.
 - **Optional fields**: All optional request fields use `#[serde(skip_serializing_if = "Option::is_none")]`.
-- **No tests yet**: The project currently has no Rust tests. The C++ engine is tested upstream.
+- **Tests**: Unit tests live inline under `#[cfg(test)]` (native batch result merging in `handlers.rs`, env parsing helpers in `main.rs`); run with `cargo test`. The C++ engine itself is tested upstream.
 
 ## Concurrency Model
 
@@ -56,6 +57,15 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers; writer-priority prevents starvation.
 
 Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand.
+
+`DECK_ENGINE_THREADS` (default 1, clamped to available parallelism) sets the C++ engine's internal thread count. Keep `pool size × engine threads` within the CPU count; startup logs a warning when oversubscribed.
+
+## Batch Recommendation (adaptive)
+
+Batch `/recommend` picks its execution strategy from `DECK_ENGINE_THREADS`:
+
+- **`= 1` (default)**: items fan out across the Rust `EnginePool` using scoped worker threads, one engine slot per worker.
+- **`> 1`**: the whole batch is sent as one JSON array through a single native FFI call (`deck_recommend_recommend_batch_with_context_n`), letting the C++ engine parallelize internally; results are merged back per-item by `merge_native_batch_results` in `handlers.rs`.
 
 ## Binary Protocol
 
@@ -114,7 +124,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude (any model): `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 4.7`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -139,7 +149,7 @@ Use the standardized workflow layout in `.github/workflows`:
 Workflow maintenance rules:
 
 - Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Use `actions/checkout@v7`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
 - Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
 - Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
 - Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.

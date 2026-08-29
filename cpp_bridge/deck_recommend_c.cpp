@@ -20,15 +20,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -67,43 +67,37 @@ static size_t nullable_cstr_size(const char* value) {
     return value ? std::string_view(value).size() : 0;
 }
 
-static void* yyjson_cpp_alloc(void*, size_t size) noexcept {
-    return ::operator new(size, std::nothrow);
+template <typename Writer>
+static std::string write_json_with_pool(Writer&& writer, const std::string& error_prefix) {
+    size_t capacity = 4096;
+    while (true) {
+        const size_t word_count =
+            (capacity + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
+        std::vector<std::max_align_t> storage(word_count);
+        yyjson_alc allocator{};
+        if (!yyjson_alc_pool_init(
+                &allocator,
+                storage.data(),
+                storage.size() * sizeof(std::max_align_t)
+            )) {
+            throw std::runtime_error(error_prefix + ": failed to initialize JSON memory pool");
+        }
+
+        size_t len = 0;
+        yyjson_write_err err{};
+        if (char* out = writer(&allocator, &len, &err)) {
+            return std::string(out, len);
+        }
+        if (err.code != YYJSON_WRITE_ERROR_MEMORY_ALLOCATION) {
+            const std::string message = err.msg ? err.msg : "unknown error";
+            throw std::runtime_error(error_prefix + ": " + message);
+        }
+        if (capacity > std::numeric_limits<size_t>::max() / 2) {
+            throw std::runtime_error(error_prefix + ": JSON output is too large");
+        }
+        capacity *= 2;
+    }
 }
-
-static void yyjson_cpp_free(void*, void* ptr) noexcept {
-    ::operator delete(ptr);
-}
-
-static void* yyjson_cpp_realloc(void*, void* ptr, size_t old_size, size_t new_size) noexcept {
-    if (!ptr) {
-        return yyjson_cpp_alloc(nullptr, new_size);
-    }
-    if (new_size == 0) {
-        yyjson_cpp_free(nullptr, ptr);
-        return nullptr;
-    }
-    void* replacement = yyjson_cpp_alloc(nullptr, new_size);
-    if (!replacement) {
-        return nullptr;
-    }
-    std::memcpy(replacement, ptr, std::min(old_size, new_size));
-    yyjson_cpp_free(nullptr, ptr);
-    return replacement;
-}
-
-static const yyjson_alc kYyjsonCppAllocator = {
-    yyjson_cpp_alloc,
-    yyjson_cpp_realloc,
-    yyjson_cpp_free,
-    nullptr,
-};
-
-struct YyjsonBufferDeleter {
-    void operator()(char* ptr) const noexcept {
-        yyjson_cpp_free(nullptr, ptr);
-    }
-};
 
 static std::string hash_userdata_payload(std::string_view payload) {
     uint64_t hash = 14695981039346656037ull;
@@ -140,10 +134,6 @@ static std::string normalize_masterdata_key(std::string key) {
     return key;
 }
 
-static std::string json_write_error_message(const yyjson_write_err& err) {
-    return err.msg ? std::string(err.msg) : std::string("unknown error");
-}
-
 static std::string json_read_error_message(const yyjson_read_err& err) {
     return err.msg ? std::string(err.msg) : std::string("unknown error");
 }
@@ -173,21 +163,18 @@ static json_doc parse_json_bytes(const char* data, size_t len, const std::string
 }
 
 static std::string dump_json(const json_view& value) {
-    size_t len = 0;
-    yyjson_write_err err{};
-    char* out = yyjson_val_write_opts(
-        value.raw(),
-        YYJSON_WRITE_NOFLAG,
-        &kYyjsonCppAllocator,
-        &len,
-        &err
+    return write_json_with_pool(
+        [&](yyjson_alc* allocator, size_t* len, yyjson_write_err* err) {
+            return yyjson_val_write_opts(
+                value.raw(),
+                YYJSON_WRITE_NOFLAG,
+                allocator,
+                len,
+                err
+            );
+        },
+        "Failed to serialize JSON value"
     );
-    if (!out) {
-        throw std::runtime_error("Failed to serialize JSON value: " + json_write_error_message(err));
-    }
-    std::unique_ptr<char, YyjsonBufferDeleter> owned_out(out);
-    std::string result(owned_out.get(), len);
-    return result;
 }
 
 static std::string extract_json_string_or_dump(const json_view& value) {
@@ -291,21 +278,18 @@ static void json_array_append(yyjson_mut_val* arr, yyjson_mut_val* value) {
 }
 
 static std::string dump_mutable_json(yyjson_mut_val* value) {
-    size_t len = 0;
-    yyjson_write_err err{};
-    char* out = yyjson_mut_val_write_opts(
-        value,
-        YYJSON_WRITE_NOFLAG,
-        &kYyjsonCppAllocator,
-        &len,
-        &err
+    return write_json_with_pool(
+        [&](yyjson_alc* allocator, size_t* len, yyjson_write_err* err) {
+            return yyjson_mut_val_write_opts(
+                value,
+                YYJSON_WRITE_NOFLAG,
+                allocator,
+                len,
+                err
+            );
+        },
+        "Failed to serialize JSON output"
     );
-    if (!out) {
-        throw std::runtime_error("Failed to serialize JSON output: " + json_write_error_message(err));
-    }
-    std::unique_ptr<char, YyjsonBufferDeleter> owned_out(out);
-    std::string result(owned_out.get(), len);
-    return result;
 }
 
 static yyjson_mut_val* json_object(yyjson_mut_doc* doc) {

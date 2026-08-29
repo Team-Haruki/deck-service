@@ -78,6 +78,15 @@ fn env_tool(var: &str, default: &str) -> String {
     env::var(var).unwrap_or_else(|_| default.to_owned())
 }
 
+fn cpp_coverage_enabled() -> bool {
+    env::var("DECK_CPP_COVERAGE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
 fn run_checked(command: &mut Command, description: &str) {
     let output = command
         .output()
@@ -335,11 +344,11 @@ fn compile_native_cpp_object(
     bridge_dir: &Path,
     source: &Path,
     object: &Path,
+    coverage: bool,
 ) {
     let mut command = Command::new(compiler);
     command
         .arg("-std=c++20")
-        .arg("-O2")
         .arg("-fno-sanitize=all")
         .arg("-I")
         .arg(cpp_src)
@@ -352,13 +361,24 @@ fn compile_native_cpp_object(
         .arg("-o")
         .arg(object);
 
+    if coverage {
+        command.args(["-O0", "-g", "--coverage"]);
+    } else {
+        command.arg("-O2");
+    }
+
     run_checked(&mut command, &format!("compile {}", source.display()));
 }
 
-fn compile_native_c_object(compiler: &str, include_dir: &Path, source: &Path, object: &Path) {
+fn compile_native_c_object(
+    compiler: &str,
+    include_dir: &Path,
+    source: &Path,
+    object: &Path,
+    coverage: bool,
+) {
     let mut command = Command::new(compiler);
     command
-        .arg("-O2")
         .arg("-fno-sanitize=all")
         .arg("-I")
         .arg(include_dir)
@@ -367,10 +387,16 @@ fn compile_native_c_object(compiler: &str, include_dir: &Path, source: &Path, ob
         .arg("-o")
         .arg(object);
 
+    if coverage {
+        command.args(["-O0", "-g", "--coverage"]);
+    } else {
+        command.arg("-O2");
+    }
+
     run_checked(&mut command, &format!("compile {}", source.display()));
 }
 
-fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf {
+fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path, coverage: bool) -> PathBuf {
     let cpp_compiler = env_tool("CXX", "c++");
     let c_compiler = env_tool("CC", "cc");
     let archiver = env_tool("AR", "ar");
@@ -398,6 +424,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
             &bridge_dir,
             &cpp_src.join(source),
             &object,
+            coverage,
         );
         objects.push(object);
     }
@@ -410,6 +437,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
         &bridge_dir,
         &bridge_dir.join(BRIDGE_SOURCE),
         &bridge_object,
+        coverage,
     );
     objects.push(bridge_object);
 
@@ -419,6 +447,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path) -> PathBuf
         &yyjson_include,
         &yyjson_include.join(YYJSON_SOURCE),
         &yyjson_object,
+        coverage,
     );
     objects.push(yyjson_object);
 
@@ -442,6 +471,7 @@ fn emit_rerun_metadata(root: &Path, cpp_root: &Path) {
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=AR");
+    println!("cargo:rerun-if-env-changed=DECK_CPP_COVERAGE");
     println!(
         "cargo:rerun-if-changed={}",
         root.join("build.zig").display()
@@ -491,6 +521,10 @@ fn main() {
     let use_libstdcpp = use_libstdcpp(&target);
     let native_linux_gnu = is_native_linux_gnu(&host, &target);
     let native_apple_darwin = is_native_apple_darwin(&host, &target);
+    let cpp_coverage = cpp_coverage_enabled();
+    if cpp_coverage && !native_linux_gnu {
+        panic!("DECK_CPP_COVERAGE is only supported for native Linux GNU builds");
+    }
     let libstdcpp_include_dirs = if use_libstdcpp && !native_linux_gnu {
         discover_libstdcpp_include_dirs()
     } else {
@@ -504,7 +538,7 @@ fn main() {
     emit_rerun_metadata(root, &cpp_root);
 
     let lib_dir = if native_linux_gnu || native_apple_darwin {
-        run_native_cpp_tools(root, &cpp_root, &out_dir)
+        run_native_cpp_tools(root, &cpp_root, &out_dir, cpp_coverage)
     } else if host.contains("apple-darwin") {
         run_direct_zig_tools(root, &cpp_root, &out_dir, zig_target, use_libstdcpp)
     } else {
@@ -523,4 +557,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static={LIB_NAME}");
     emit_cpp_stdlib_links(&target);
+    if cpp_coverage {
+        println!("cargo:rustc-link-lib=gcov");
+    }
 }

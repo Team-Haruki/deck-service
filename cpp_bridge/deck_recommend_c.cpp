@@ -618,6 +618,9 @@ SharedUserdataStore& shared_userdata_store() {
 // ---- internal SekaiDeckRecommend wrapper (same logic as pybind11/wasm versions) ----
 
 class SekaiDeckRecommendC {
+#ifdef DECK_BRIDGE_UNIT_TEST
+public:
+#endif
     std::unordered_map<std::string, std::shared_ptr<UserData>> userdata_cache;
     std::deque<std::string> userdata_cache_order;
 

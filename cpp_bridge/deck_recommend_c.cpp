@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -46,11 +47,9 @@ constexpr int kMaxRecommendTimeoutMs = 5000;
 // ---- helpers ----
 
 static char* alloc_cstr(const std::string& s) {
-    char* p = (char*)std::malloc(s.size() + 1);
-    if (p) {
-        std::memcpy(p, s.c_str(), s.size() + 1);
-    }
-    return p;
+    auto result = std::make_unique_for_overwrite<char[]>(s.size() + 1);
+    std::memcpy(result.get(), s.c_str(), s.size() + 1);
+    return result.release();
 }
 
 static char* alloc_cstr(const std::string& s, size_t* len_out) {
@@ -63,6 +62,48 @@ static char* alloc_cstr(const std::string& s, size_t* len_out) {
 static char* alloc_error(const std::string& msg) {
     return alloc_cstr(msg);
 }
+
+static size_t nullable_cstr_size(const char* value) {
+    return value ? std::string_view(value).size() : 0;
+}
+
+static void* yyjson_cpp_alloc(void*, size_t size) noexcept {
+    return ::operator new(size, std::nothrow);
+}
+
+static void yyjson_cpp_free(void*, void* ptr) noexcept {
+    ::operator delete(ptr);
+}
+
+static void* yyjson_cpp_realloc(void*, void* ptr, size_t old_size, size_t new_size) noexcept {
+    if (!ptr) {
+        return yyjson_cpp_alloc(nullptr, new_size);
+    }
+    if (new_size == 0) {
+        yyjson_cpp_free(nullptr, ptr);
+        return nullptr;
+    }
+    void* replacement = yyjson_cpp_alloc(nullptr, new_size);
+    if (!replacement) {
+        return nullptr;
+    }
+    std::memcpy(replacement, ptr, std::min(old_size, new_size));
+    yyjson_cpp_free(nullptr, ptr);
+    return replacement;
+}
+
+static const yyjson_alc kYyjsonCppAllocator = {
+    yyjson_cpp_alloc,
+    yyjson_cpp_realloc,
+    yyjson_cpp_free,
+    nullptr,
+};
+
+struct YyjsonBufferDeleter {
+    void operator()(char* ptr) const noexcept {
+        yyjson_cpp_free(nullptr, ptr);
+    }
+};
 
 static std::string hash_userdata_payload(std::string_view payload) {
     uint64_t hash = 14695981039346656037ull;
@@ -134,12 +175,18 @@ static json_doc parse_json_bytes(const char* data, size_t len, const std::string
 static std::string dump_json(const json_view& value) {
     size_t len = 0;
     yyjson_write_err err{};
-    char* out = yyjson_val_write_opts(value.raw(), YYJSON_WRITE_NOFLAG, nullptr, &len, &err);
+    char* out = yyjson_val_write_opts(
+        value.raw(),
+        YYJSON_WRITE_NOFLAG,
+        &kYyjsonCppAllocator,
+        &len,
+        &err
+    );
     if (!out) {
         throw std::runtime_error("Failed to serialize JSON value: " + json_write_error_message(err));
     }
-    std::string result(out, len);
-    std::free(out);
+    std::unique_ptr<char, YyjsonBufferDeleter> owned_out(out);
+    std::string result(owned_out.get(), len);
     return result;
 }
 
@@ -175,8 +222,12 @@ static std::string context_value_or_json(
 }
 
 static std::string json_type_name(const json_view& value) {
-    const char* type = yyjson_get_type_desc(const_cast<yyjson_val*>(value.raw()));
-    return type ? std::string(type) : std::string("null");
+    if (value.is_null()) return "null";
+    if (value.is_object()) return "object";
+    if (value.is_array()) return "array";
+    if (value.is_string()) return "string";
+    if (value.is_number_integer()) return "integer";
+    return "other";
 }
 
 class MutableJsonDoc {
@@ -242,12 +293,18 @@ static void json_array_append(yyjson_mut_val* arr, yyjson_mut_val* value) {
 static std::string dump_mutable_json(yyjson_mut_val* value) {
     size_t len = 0;
     yyjson_write_err err{};
-    char* out = yyjson_mut_val_write_opts(value, YYJSON_WRITE_NOFLAG, nullptr, &len, &err);
+    char* out = yyjson_mut_val_write_opts(
+        value,
+        YYJSON_WRITE_NOFLAG,
+        &kYyjsonCppAllocator,
+        &len,
+        &err
+    );
     if (!out) {
         throw std::runtime_error("Failed to serialize JSON output: " + json_write_error_message(err));
     }
-    std::string result(out, len);
-    std::free(out);
+    std::unique_ptr<char, YyjsonBufferDeleter> owned_out(out);
+    std::string result(owned_out.get(), len);
     return result;
 }
 
@@ -765,14 +822,35 @@ class SekaiDeckRecommendC {
         return deckDetails.front();
     }
 
-    void apply_custom_bonus_options(DeckRecommendConfig& config, const json_view& opts) {
+    static int parse_custom_bonus_character_id_key(
+        const std::string& cid_key,
+        const json_view& value
+    ) {
+        try {
+            size_t parsed = 0;
+            int cid = std::stoi(cid_key, &parsed);
+            if (parsed != cid_key.size()) {
+                throw std::invalid_argument("invalid key");
+            }
+            return cid;
+        } catch (const std::exception&) {
+            throw std::invalid_argument(
+                "Invalid custom bonus support unit character ID key: " + cid_key +
+                " (value type: " + json_type_name(value) + ")"
+            );
+        }
+    }
+
+    static void apply_custom_bonus_attribute(DeckRecommendConfig& config, const json_view& opts) {
         if (auto value = json_opt<std::string>(opts, "custom_bonus_attr")) {
             if (!VALID_EVENT_ATTRS.count(*value)) {
                 throw std::invalid_argument("Invalid custom bonus attr: " + *value);
             }
             config.customBonusAttr = mapEnum(EnumMap::attr, *value);
         }
+    }
 
+    static void apply_custom_bonus_characters(DeckRecommendConfig& config, const json_view& opts) {
         if (auto value = json_opt<std::vector<int>>(opts, "custom_bonus_character_ids")) {
             std::set<int> unique_cids;
             std::vector<int> cids;
@@ -788,59 +866,645 @@ class SekaiDeckRecommendC {
             }
             config.customBonusCharacterIds = cids;
         }
+    }
 
-        if (opts.contains("custom_bonus_character_support_units")
-            && !opts["custom_bonus_character_support_units"].is_null()) {
-            json_view support_units_json = opts["custom_bonus_character_support_units"];
-            if (!support_units_json.is_object()) {
-                throw std::invalid_argument("custom_bonus_character_support_units must be an object.");
-            }
-
-            std::unordered_map<int, int> support_units;
-            yyjson_obj_iter iter = yyjson_obj_iter_with(support_units_json.raw());
-            yyjson_val* key = nullptr;
-            while ((key = yyjson_obj_iter_next(&iter))) {
-                const char* raw_cid_key = yyjson_get_str(key);
-                const std::string cid_key = raw_cid_key ? std::string(raw_cid_key) : std::string();
-                json_view value(yyjson_obj_iter_get_val(key));
-                int cid = 0;
-                try {
-                    size_t parsed = 0;
-                    cid = std::stoi(cid_key, &parsed);
-                    if (parsed != cid_key.size()) {
-                        throw std::invalid_argument("invalid key");
-                    }
-                } catch (const std::exception&) {
-                    throw std::invalid_argument(
-                        "Invalid custom bonus support unit character ID key: " + cid_key +
-                        " (value type: " + json_type_name(value) + ")"
-                    );
-                }
-                std::string unit_name = value.get<std::string>();
-                if (cid < 1 || cid > 26) {
-                    throw std::invalid_argument("Invalid custom bonus support unit character ID: " + std::to_string(cid));
-                }
-                if (cid < 21 || cid > 26) {
-                    throw std::invalid_argument("custom bonus support unit is only valid for virtual singer characters.");
-                }
-                if (!VALID_UNIT_TYPES.count(unit_name) || unit_name == "piapro") {
-                    throw std::invalid_argument("Invalid custom bonus support unit: " + unit_name);
-                }
-                if (!config.customBonusCharacterIds.has_value()
-                    || std::find(
-                        config.customBonusCharacterIds->begin(),
-                        config.customBonusCharacterIds->end(),
-                        cid
-                    ) == config.customBonusCharacterIds->end()) {
-                    throw std::invalid_argument(
-                        "custom bonus support unit character ID must be included in custom_bonus_character_ids: "
-                        + std::to_string(cid)
-                    );
-                }
-                support_units[cid] = mapEnum(EnumMap::unit, unit_name);
-            }
-            config.customBonusSupportUnits = support_units;
+    static void apply_custom_bonus_support_units(DeckRecommendConfig& config, const json_view& opts) {
+        if (!opts.contains("custom_bonus_character_support_units")
+            || opts["custom_bonus_character_support_units"].is_null()) {
+            return;
         }
+        json_view support_units_json = opts["custom_bonus_character_support_units"];
+        if (!support_units_json.is_object()) {
+            throw std::invalid_argument("custom_bonus_character_support_units must be an object.");
+        }
+
+        std::unordered_map<int, int> support_units;
+        yyjson_obj_iter iter = yyjson_obj_iter_with(support_units_json.raw());
+        yyjson_val* key = nullptr;
+        while ((key = yyjson_obj_iter_next(&iter))) {
+            const char* raw_cid_key = yyjson_get_str(key);
+            const std::string cid_key = raw_cid_key ? std::string(raw_cid_key) : std::string();
+            json_view value(yyjson_obj_iter_get_val(key));
+            int cid = parse_custom_bonus_character_id_key(cid_key, value);
+            std::string unit_name = value.get<std::string>();
+            if (cid < 21 || cid > 26) {
+                throw std::invalid_argument(
+                    "custom bonus support unit is only valid for virtual singer characters."
+                );
+            }
+            if (!VALID_UNIT_TYPES.count(unit_name) || unit_name == "piapro") {
+                throw std::invalid_argument("Invalid custom bonus support unit: " + unit_name);
+            }
+            if (!config.customBonusCharacterIds.has_value()
+                || std::find(
+                    config.customBonusCharacterIds->begin(),
+                    config.customBonusCharacterIds->end(),
+                    cid
+                ) == config.customBonusCharacterIds->end()) {
+                throw std::invalid_argument(
+                    "custom bonus support unit character ID must be included in custom_bonus_character_ids: "
+                    + std::to_string(cid)
+                );
+            }
+            support_units[cid] = mapEnum(EnumMap::unit, unit_name);
+        }
+        config.customBonusSupportUnits = support_units;
+    }
+
+    static void apply_custom_bonus_options(DeckRecommendConfig& config, const json_view& opts) {
+        apply_custom_bonus_attribute(config, opts);
+        apply_custom_bonus_characters(config, opts);
+        apply_custom_bonus_support_units(config, opts);
+    }
+
+    struct LiveContext {
+        int type;
+        bool is_mysekai;
+        bool is_challenge;
+    };
+
+    static Region resolve_region(const std::string& region_str) {
+        if (!REGION_MAP.count(region_str)) {
+            throw std::invalid_argument("Invalid region: " + region_str);
+        }
+        return REGION_MAP.at(region_str);
+    }
+
+    static LiveContext resolve_live_context(const json_view& opts) {
+        if (!opts.contains("live_type") || !opts["live_type"].is_string()) {
+            throw std::invalid_argument("live_type is required.");
+        }
+        std::string live_type_str = opts["live_type"].get<std::string>();
+        if (!VALID_LIVE_TYPES.count(live_type_str)) {
+            throw std::invalid_argument("Invalid live type: " + live_type_str);
+        }
+        bool is_mysekai = live_type_str == "mysekai";
+        int live_type = is_mysekai
+            ? mapEnum(EnumMap::liveType, "multi")
+            : mapEnum(EnumMap::liveType, live_type_str);
+        return {live_type, is_mysekai, Enums::LiveType::isChallenge(live_type)};
+    }
+
+    static int resolve_world_bloom_fake_event_id(
+        const json_view& opts,
+        const DataProvider& dp
+    ) {
+        int turn = opts["world_bloom_event_turn"].get<int>();
+        if (turn < 1 || turn > 3) {
+            throw std::invalid_argument("Invalid world bloom event turn.");
+        }
+        if (turn == 3) {
+            auto character_id = json_opt<int>(opts, "world_bloom_character_id");
+            if (!character_id.has_value()) {
+                throw std::invalid_argument(
+                    "world_bloom_character_id is required for world bloom 3 fake event."
+                );
+            }
+            int part = dp.masterData->getWorldBloom3PartByCharacterId(*character_id);
+            return dp.masterData->getWorldBloomFakeEventId(turn, part);
+        }
+
+        auto event_unit = json_opt<std::string>(opts, "event_unit");
+        if (!event_unit.has_value()) {
+            throw std::invalid_argument("event_unit is required for world bloom fake event.");
+        }
+        if (!VALID_UNIT_TYPES.count(*event_unit)) {
+            throw std::invalid_argument("Invalid event unit: " + *event_unit);
+        }
+        return dp.masterData->getWorldBloomFakeEventId(
+            turn,
+            mapEnum(EnumMap::unit, *event_unit)
+        );
+    }
+
+    static int resolve_fake_event_id(const json_view& opts, const DataProvider& dp) {
+        std::string event_type = json_opt<std::string>(opts, "event_type").value_or("marathon");
+        if (!VALID_EVENT_TYPES.count(event_type)) {
+            throw std::invalid_argument("Invalid event type: " + event_type);
+        }
+        if (json_opt<int>(opts, "world_bloom_event_turn").has_value()) {
+            return resolve_world_bloom_fake_event_id(opts, dp);
+        }
+
+        bool has_event_attr = opts.contains("event_attr");
+        bool has_event_unit = opts.contains("event_unit");
+        auto event_type_enum = mapEnum(EnumMap::eventType, event_type);
+        if (!has_event_attr && !has_event_unit) {
+            return dp.masterData->getNoEventFakeEventId(event_type_enum);
+        }
+        if (!has_event_attr || !has_event_unit) {
+            throw std::invalid_argument("event_attr and event_unit must be specified together.");
+        }
+        std::string event_attr = opts["event_attr"].get<std::string>();
+        std::string event_unit = opts["event_unit"].get<std::string>();
+        if (!VALID_EVENT_ATTRS.count(event_attr)) {
+            throw std::invalid_argument("Invalid event attr: " + event_attr);
+        }
+        if (!VALID_UNIT_TYPES.count(event_unit)) {
+            throw std::invalid_argument("Invalid event unit: " + event_unit);
+        }
+        return dp.masterData->getUnitAttrFakeEventId(
+            event_type_enum,
+            mapEnum(EnumMap::unit, event_unit),
+            mapEnum(EnumMap::attr, event_attr)
+        );
+    }
+
+    static int resolve_event_id(
+        const json_view& opts,
+        const DataProvider& dp,
+        bool is_challenge
+    ) {
+        auto event_id = json_opt<int>(opts, "event_id");
+        if (!event_id.has_value()) {
+            return is_challenge ? 0 : resolve_fake_event_id(opts, dp);
+        }
+        if (is_challenge) {
+            throw std::invalid_argument("event_id is not valid for challenge live.");
+        }
+        findOrThrow(dp.masterData->events, [&](const Event& event) {
+            return event.id == *event_id;
+        }, "Event not found for eventId: " + std::to_string(*event_id));
+        return *event_id;
+    }
+
+    static int resolve_challenge_character_id(const json_view& opts, bool is_challenge) {
+        auto character_id = json_opt<int>(opts, "challenge_live_character_id");
+        if (!character_id.has_value()) {
+            if (is_challenge) {
+                throw std::invalid_argument(
+                    "challenge_live_character_id is required for challenge live."
+                );
+            }
+            return 0;
+        }
+        if (*character_id < 1 || *character_id > 26) {
+            throw std::invalid_argument("Invalid challenge character ID.");
+        }
+        return *character_id;
+    }
+
+    static int resolve_world_bloom_character_id(
+        const json_view& opts,
+        const DataProvider& dp,
+        int event_id
+    ) {
+        auto character_id = json_opt<int>(opts, "world_bloom_character_id");
+        if (!character_id.has_value()) {
+            return 0;
+        }
+        if (*character_id < 1 || *character_id > 26) {
+            throw std::invalid_argument("Invalid world bloom character ID.");
+        }
+        findOrThrow(dp.masterData->worldBlooms, [&](const WorldBloom& world_bloom) {
+            return world_bloom.eventId == event_id
+                && world_bloom.gameCharacterId == *character_id;
+        }, std::string("World bloom chapter not found."));
+        return *character_id;
+    }
+
+    static void apply_target_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        bool is_mysekai
+    ) {
+        if (is_mysekai) {
+            config.target = RecommendTarget::Mysekai;
+        } else {
+            std::string target = json_opt<std::string>(opts, "target").value_or("score");
+            if (!VALID_TARGETS.count(target)) {
+                throw std::invalid_argument("Invalid target: " + target);
+            }
+            if (target == "score") config.target = RecommendTarget::Score;
+            if (target == "skill") config.target = RecommendTarget::Skill;
+            if (target == "power") config.target = RecommendTarget::Power;
+            if (target == "bonus") config.target = RecommendTarget::Bonus;
+        }
+
+        auto bonus_list = json_opt<std::vector<int>>(opts, "target_bonus_list");
+        if (!bonus_list.has_value() || bonus_list->empty()) {
+            return;
+        }
+        if (config.target != RecommendTarget::Bonus) {
+            throw std::invalid_argument("target_bonus_list is only valid for bonus target.");
+        }
+        config.bonusList = *bonus_list;
+    }
+
+    static void apply_algorithm_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        bool is_challenge
+    ) {
+        std::string algorithm = json_opt<std::string>(opts, "algorithm")
+            .value_or(is_challenge ? "dfs" : "ga");
+        if (!VALID_ALGORITHMS.count(algorithm)) {
+            throw std::invalid_argument("Invalid algorithm: " + algorithm);
+        }
+        if (algorithm == "sa") config.algorithm = RecommendAlgorithm::SA;
+        if (algorithm == "dfs") config.algorithm = RecommendAlgorithm::DFS;
+        if (algorithm == "ga") config.algorithm = RecommendAlgorithm::GA;
+        if (algorithm == "dfs_ga" || algorithm == "dfs-ga") {
+            config.algorithm = RecommendAlgorithm::DFS_GA;
+        }
+        if (algorithm == "rl") config.algorithm = RecommendAlgorithm::RL;
+    }
+
+    static void apply_music_and_size_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        const DataProvider& dp
+    ) {
+        config.musicId = require_int_field(opts, "music_id");
+        std::string music_diff = require_string_field(opts, "music_diff");
+        if (!VALID_MUSIC_DIFFS.count(music_diff)) {
+            throw std::invalid_argument("Invalid music difficulty: " + music_diff);
+        }
+        config.musicDiff = mapEnum(EnumMap::musicDifficulty, music_diff);
+        findOrThrow(dp.musicMetas->metas, [&](const MusicMeta& meta) {
+            return meta.music_id == config.musicId && meta.difficulty == config.musicDiff;
+        }, "Music meta not found for musicId: " + std::to_string(config.musicId));
+
+        config.limit = json_opt<int>(opts, "limit").value_or(10);
+        if (config.limit < 1) {
+            throw std::invalid_argument("Invalid limit.");
+        }
+        config.member = json_opt<int>(opts, "member").value_or(5);
+        if (config.member < 2 || config.member > 5) {
+            throw std::invalid_argument("Invalid member count.");
+        }
+    }
+
+    static void apply_fixed_card_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        const DataProvider& dp
+    ) {
+        auto fixed_cards = json_opt<std::vector<int>>(opts, "fixed_cards");
+        if (!fixed_cards.has_value()) {
+            return;
+        }
+        config.fixedCards = *fixed_cards;
+        if (static_cast<int>(config.fixedCards.size()) > config.member) {
+            throw std::invalid_argument("Fixed cards size exceeds member count.");
+        }
+        for (int card_id : config.fixedCards) {
+            findOrThrow(dp.masterData->cards, [&](const Card& card) {
+                return card.id == card_id;
+            }, "Invalid fixed card ID: " + std::to_string(card_id));
+        }
+    }
+
+    static void apply_fixed_character_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        bool is_challenge
+    ) {
+        auto fixed_characters = json_opt<std::vector<int>>(opts, "fixed_characters");
+        if (!fixed_characters.has_value()) {
+            return;
+        }
+        config.fixedCharacters = *fixed_characters;
+        if (static_cast<int>(config.fixedCharacters.size()) > config.member) {
+            throw std::invalid_argument("Fixed characters size exceeds member count.");
+        }
+        if (is_challenge) {
+            throw std::invalid_argument("fixed_characters is not valid for challenge live.");
+        }
+        for (int character_id : config.fixedCharacters) {
+            if (character_id < 1 || character_id > 26) {
+                throw std::invalid_argument(
+                    "Invalid fixed character ID: " + std::to_string(character_id)
+                );
+            }
+        }
+    }
+
+    static void apply_forced_leader_option(DeckRecommendConfig& config, const json_view& opts) {
+        auto character_id = json_opt<int>(opts, "forced_leader_character_id");
+        if (!character_id.has_value()) {
+            character_id = json_opt<int>(opts, "forcedLeaderCharacterId");
+        }
+        if (!character_id.has_value()) {
+            return;
+        }
+        if (*character_id < 1 || *character_id > 26) {
+            throw std::invalid_argument(
+                "Invalid forced leader character ID: " + std::to_string(*character_id)
+            );
+        }
+        config.forcedLeaderCharacterId = *character_id;
+    }
+
+    static void apply_skill_strategy_options(DeckRecommendConfig& config, const json_view& opts) {
+        std::string reference_strategy = json_opt<std::string>(
+            opts,
+            "skill_reference_choose_strategy"
+        ).value_or("average");
+        if (!VALID_SKILL_REF_STRATEGIES.count(reference_strategy)) {
+            throw std::invalid_argument("Invalid skill ref strategy: " + reference_strategy);
+        }
+        if (reference_strategy == "average") {
+            config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Average;
+        }
+        if (reference_strategy == "max") {
+            config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Max;
+        }
+        if (reference_strategy == "min") {
+            config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Min;
+        }
+
+        std::string order_strategy = json_opt<std::string>(
+            opts,
+            "skill_order_choose_strategy"
+        ).value_or("average");
+        if (!VALID_SKILL_ORDER_STRATEGIES.count(order_strategy)) {
+            throw std::invalid_argument("Invalid skill order strategy: " + order_strategy);
+        }
+        if (order_strategy == "average") config.liveSkillOrder = LiveSkillOrder::average;
+        if (order_strategy == "max") config.liveSkillOrder = LiveSkillOrder::best;
+        if (order_strategy == "min") config.liveSkillOrder = LiveSkillOrder::worst;
+        if (order_strategy == "specific") config.liveSkillOrder = LiveSkillOrder::specific;
+        if (auto specific_order = json_opt<std::vector<int>>(opts, "specific_skill_order")) {
+            config.specificSkillOrder = *specific_order;
+        }
+    }
+
+    static void apply_multi_live_options(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        int live_type
+    ) {
+        bool is_multi = Enums::LiveType::isMulti(live_type);
+        if (auto score_up = json_opt<int>(opts, "multi_live_teammate_score_up")) {
+            if (!is_multi) {
+                throw std::invalid_argument(
+                    "multi_live_teammate_score_up is only valid for multi live."
+                );
+            }
+            config.multiTeammateScoreUp = *score_up;
+        }
+        if (auto power = json_opt<int>(opts, "multi_live_teammate_power")) {
+            if (!is_multi) {
+                throw std::invalid_argument(
+                    "multi_live_teammate_power is only valid for multi live."
+                );
+            }
+            config.multiTeammatePower = *power;
+        }
+        if (auto lower_bound = json_opt<double>(opts, "multi_live_score_up_lower_bound")) {
+            if (!is_multi) {
+                throw std::invalid_argument(
+                    "multi_live_score_up_lower_bound is only valid for multi live."
+                );
+            }
+            config.multiScoreUpLowerBound = *lower_bound;
+        }
+    }
+
+    static void apply_card_options(DeckRecommendConfig& config, const json_view& opts) {
+        for (const auto& rarity : {
+            "rarity_1", "rarity_2", "rarity_3", "rarity_birthday", "rarity_4"
+        }) {
+            std::string key = std::string(rarity) + "_config";
+            CardConfig card_config{};
+            if (opts.contains(key) && opts[key].is_object()) {
+                apply_card_config(card_config, opts[key]);
+            }
+            config.cardConfig[mapEnum(EnumMap::cardRarityType, rarity)] = card_config;
+        }
+        if (opts.contains("single_card_configs") && opts["single_card_configs"].is_array()) {
+            for (const auto& item : opts["single_card_configs"]) {
+                CardConfig card_config{};
+                apply_card_config(card_config, item);
+                config.singleCardConfig[item["card_id"].get<int>()] = card_config;
+            }
+        }
+        if (auto support_master_max = json_opt<bool>(opts, "support_master_max")) {
+            config.supportMasterMax = *support_master_max;
+        }
+        if (auto support_skill_max = json_opt<bool>(opts, "support_skill_max")) {
+            config.supportSkillMax = *support_skill_max;
+        }
+    }
+
+    static void apply_sa_options(DeckRecommendConfig& config, const json_view& opts) {
+        if (!opts.contains("sa_options") || !opts["sa_options"].is_object()) {
+            return;
+        }
+        const auto sa = opts["sa_options"];
+        if (sa.contains("run_num")) config.saRunCount = sa["run_num"].get<int>();
+        if (config.saRunCount < 1) {
+            throw std::invalid_argument("Invalid sa run count: " + std::to_string(config.saRunCount));
+        }
+        if (sa.contains("seed")) config.saSeed = sa["seed"].get<int>();
+        if (sa.contains("max_iter")) config.saMaxIter = sa["max_iter"].get<int>();
+        if (config.saMaxIter < 1) {
+            throw std::invalid_argument("Invalid sa max iter: " + std::to_string(config.saMaxIter));
+        }
+        if (sa.contains("max_no_improve_iter")) {
+            config.saMaxIterNoImprove = sa["max_no_improve_iter"].get<int>();
+        }
+        if (config.saMaxIterNoImprove < 1) {
+            throw std::invalid_argument(
+                "Invalid sa max no improve iter: " + std::to_string(config.saMaxIterNoImprove)
+            );
+        }
+        if (sa.contains("time_limit_ms")) config.saMaxTimeMs = sa["time_limit_ms"].get<int>();
+        if (config.saMaxTimeMs < 0) {
+            throw std::invalid_argument("Invalid sa max time ms: " + std::to_string(config.saMaxTimeMs));
+        }
+        if (sa.contains("start_temprature")) {
+            config.saStartTemperature = sa["start_temprature"].get<double>();
+        } else if (sa.contains("start_temperature")) {
+            config.saStartTemperature = sa["start_temperature"].get<double>();
+        }
+        if (config.saStartTemperature < 0) {
+            throw std::invalid_argument(
+                "Invalid sa start temperature: " + std::to_string(config.saStartTemperature)
+            );
+        }
+        if (sa.contains("cooling_rate")) {
+            config.saCoolingRate = sa["cooling_rate"].get<double>();
+        }
+        if (config.saCoolingRate < 0 || config.saCoolingRate > 1) {
+            throw std::invalid_argument(
+                "Invalid sa cooling rate: " + std::to_string(config.saCoolingRate)
+            );
+        }
+        if (sa.contains("debug")) config.saDebug = sa["debug"].get<bool>();
+    }
+
+    static void apply_ga_options(DeckRecommendConfig& config, const json_view& opts) {
+        if (!opts.contains("ga_options") || !opts["ga_options"].is_object()) {
+            return;
+        }
+        const auto ga = opts["ga_options"];
+        if (ga.contains("seed")) config.gaSeed = ga["seed"].get<int>();
+        if (ga.contains("debug")) config.gaDebug = ga["debug"].get<bool>();
+        if (ga.contains("max_iter")) config.gaMaxIter = ga["max_iter"].get<int>();
+        if (ga.contains("max_no_improve_iter")) {
+            config.gaMaxIterNoImprove = ga["max_no_improve_iter"].get<int>();
+        }
+        if (ga.contains("pop_size")) config.gaPopSize = ga["pop_size"].get<int>();
+        if (ga.contains("parent_size")) config.gaParentSize = ga["parent_size"].get<int>();
+        if (ga.contains("elite_size")) config.gaEliteSize = ga["elite_size"].get<int>();
+        if (ga.contains("crossover_rate")) {
+            config.gaCrossoverRate = ga["crossover_rate"].get<double>();
+        }
+        if (ga.contains("base_mutation_rate")) {
+            config.gaBaseMutationRate = ga["base_mutation_rate"].get<double>();
+        }
+        if (ga.contains("no_improve_iter_to_mutation_rate")) {
+            config.gaNoImproveIterToMutationRate =
+                ga["no_improve_iter_to_mutation_rate"].get<double>();
+        }
+    }
+
+    static void apply_timeout_option(
+        DeckRecommendConfig& config,
+        const json_view& opts,
+        int default_timeout_ms
+    ) {
+        if (auto timeout_ms = json_opt<int>(opts, "timeout_ms")) {
+            config.timeout_ms = *timeout_ms;
+        } else if (default_timeout_ms > 0) {
+            config.timeout_ms = default_timeout_ms;
+        }
+        config.timeout_ms = std::clamp(config.timeout_ms, 1, kMaxRecommendTimeoutMs);
+    }
+
+    static DeckRecommendConfig build_recommend_config(
+        const json_view& opts,
+        const DataProvider& dp,
+        const LiveContext& live,
+        int default_timeout_ms
+    ) {
+        DeckRecommendConfig config{};
+        apply_target_options(config, opts, live.is_mysekai);
+        apply_custom_bonus_options(config, opts);
+        apply_algorithm_options(config, opts, live.is_challenge);
+        config.filterOtherUnit = json_opt<bool>(opts, "filter_other_unit").value_or(false);
+        apply_music_and_size_options(config, opts, dp);
+        apply_fixed_card_options(config, opts, dp);
+        apply_fixed_character_options(config, opts, live.is_challenge);
+        apply_forced_leader_option(config, opts);
+        apply_skill_strategy_options(config, opts);
+        config.keepAfterTrainingState = json_opt<bool>(opts, "keep_after_training_state")
+            .value_or(false);
+        apply_multi_live_options(config, opts, live.type);
+        config.bestSkillAsLeader = json_opt<bool>(opts, "best_skill_as_leader").value_or(true);
+        apply_timeout_option(config, opts, default_timeout_ms);
+        apply_card_options(config, opts);
+        apply_sa_options(config, opts);
+        apply_ga_options(config, opts);
+        return config;
+    }
+
+    static std::vector<RecommendDeck> execute_recommendation(
+        DataProvider& dp,
+        int event_id,
+        int challenge_character_id,
+        int world_bloom_character_id,
+        const LiveContext& live,
+        const DeckRecommendConfig& config
+    ) {
+        if (config.target == RecommendTarget::Mysekai) {
+            MysekaiDeckRecommend recommender(dp);
+            return recommender.recommendMysekaiDeck(
+                event_id,
+                config,
+                world_bloom_character_id
+            );
+        }
+        if (live.is_challenge) {
+            ChallengeLiveDeckRecommend recommender(dp);
+            return recommender.recommendChallengeLiveDeck(
+                live.type,
+                challenge_character_id,
+                config
+            );
+        }
+        EventDeckRecommend recommender(dp);
+        return recommender.recommendEventDeck(
+            event_id,
+            live.type,
+            config,
+            world_bloom_character_id
+        );
+    }
+
+    static std::string serialize_recommendation_result(
+        const std::vector<RecommendDeck>& decks,
+        double cost_ms
+    ) {
+        MutableJsonDoc out_doc;
+        yyjson_mut_val* result_json = json_object(out_doc.get());
+        yyjson_mut_val* decks_json = json_array(out_doc.get());
+        for (const auto& deck : decks) {
+            json_array_append(decks_json, recommend_deck_to_json(out_doc.get(), deck));
+        }
+        json_add_value(out_doc.get(), result_json, "decks", decks_json);
+        json_add(out_doc.get(), result_json, "cost_ms", cost_ms);
+        return dump_mutable_json(result_json);
+    }
+
+    static int resolve_support_event_id(const json_view& opts, const MasterData& masterdata) {
+        if (auto event_id = json_opt<int>(opts, "event_id")) {
+            return *event_id;
+        }
+        auto turn = json_opt<int>(opts, "world_bloom_event_turn");
+        if (!turn.has_value()) {
+            throw std::invalid_argument("event_id or world_bloom_event_turn is required.");
+        }
+        if (*turn < 1 || *turn > 3) {
+            throw std::invalid_argument(
+                "Invalid world bloom event turn: " + std::to_string(*turn)
+            );
+        }
+        if (*turn == 3) {
+            auto character_id = json_opt<int>(opts, "world_bloom_character_id");
+            if (!character_id.has_value()) {
+                throw std::invalid_argument(
+                    "world_bloom_character_id is required for world bloom 3 fake event."
+                );
+            }
+            int part = masterdata.getWorldBloom3PartByCharacterId(*character_id);
+            return masterdata.getWorldBloomFakeEventId(*turn, part);
+        }
+        auto event_unit = json_opt<std::string>(opts, "event_unit");
+        if (!event_unit.has_value()) {
+            throw std::invalid_argument("event_unit is required for world bloom fake event.");
+        }
+        if (!VALID_UNIT_TYPES.count(*event_unit)) {
+            throw std::invalid_argument("Invalid event unit: " + *event_unit);
+        }
+        return masterdata.getWorldBloomFakeEventId(
+            *turn,
+            mapEnum(EnumMap::unit, *event_unit)
+        );
+    }
+
+    static int resolve_support_character_id(const json_view& opts) {
+        auto character_id = json_opt<int>(opts, "world_bloom_character_id");
+        if (!character_id.has_value()) {
+            character_id = json_opt<int>(opts, "forced_leader_character_id");
+        }
+        if (!character_id.has_value()) {
+            character_id = json_opt<int>(opts, "forcedLeaderCharacterId");
+        }
+        if (!character_id.has_value()) {
+            throw std::invalid_argument(
+                "world_bloom_character_id or forcedLeaderCharacterId is required."
+            );
+        }
+        if (*character_id < 1 || *character_id > 26) {
+            throw std::invalid_argument(
+                "Invalid world_bloom_character_id or forcedLeaderCharacterId: "
+                + std::to_string(*character_id)
+            );
+        }
+        return *character_id;
     }
 
 public:
@@ -975,7 +1639,6 @@ public:
         size_t forced_region_len = 0,
         size_t forced_userdata_hash_len = 0
     ) {
-        // --- region ---
         std::string region_str = context_value_or_json(
             opts,
             "region",
@@ -983,15 +1646,8 @@ public:
             forced_region_len,
             "region"
         );
-        if (!REGION_MAP.count(region_str)) {
-            throw std::invalid_argument("Invalid region: " + region_str);
-        }
-        Region region = REGION_MAP.at(region_str);
-
-        // --- user data ---
+        Region region = resolve_region(region_str);
         auto userdata = resolve_userdata(opts, forced_userdata_hash, forced_userdata_hash_len);
-
-        // --- master data & music metas ---
         auto masterdata = shared_region_data_store().get_masterdata(region);
         if (!masterdata) {
             throw std::invalid_argument("Master data not found for region: " + region_str);
@@ -1000,450 +1656,29 @@ public:
         if (!musicmetas) {
             throw std::invalid_argument("Music metas not found for region: " + region_str);
         }
-
         DataProvider dp{region, masterdata, userdata, musicmetas};
-
-        // --- live type ---
-        if (!opts.contains("live_type") || !opts["live_type"].is_string()) {
-            throw std::invalid_argument("live_type is required.");
-        }
-        std::string live_type_str = opts["live_type"].get<std::string>();
-        if (!VALID_LIVE_TYPES.count(live_type_str)) {
-            throw std::invalid_argument("Invalid live type: " + live_type_str);
-        }
-
-        bool is_mysekai = (live_type_str == "mysekai");
-        int liveType = is_mysekai ? mapEnum(EnumMap::liveType, "multi") : mapEnum(EnumMap::liveType, live_type_str);
-        bool is_challenge = Enums::LiveType::isChallenge(liveType);
-
-        // --- event id ---
-        int eventId = 0;
-        if (opts.contains("event_id") && !opts["event_id"].is_null()) {
-            if (is_challenge) {
-                throw std::invalid_argument("event_id is not valid for challenge live.");
-            }
-            eventId = opts["event_id"].get<int>();
-            findOrThrow(dp.masterData->events, [&](const Event& it) {
-                return it.id == eventId;
-            }, "Event not found for eventId: " + std::to_string(eventId));
-        } else if (!is_challenge) {
-            std::string event_type_str = json_opt<std::string>(opts, "event_type").value_or("marathon");
-            if (!VALID_EVENT_TYPES.count(event_type_str)) {
-                throw std::invalid_argument("Invalid event type: " + event_type_str);
-            }
-            auto event_type_enum = mapEnum(EnumMap::eventType, event_type_str);
-
-            if (opts.contains("world_bloom_event_turn") && !opts["world_bloom_event_turn"].is_null()) {
-                int turn = opts["world_bloom_event_turn"].get<int>();
-                if (turn < 1 || turn > 3) {
-                    throw std::invalid_argument("Invalid world bloom event turn.");
-                }
-                if (turn == 3) {
-                    if (!opts.contains("world_bloom_character_id") || opts["world_bloom_character_id"].is_null()) {
-                        throw std::invalid_argument("world_bloom_character_id is required for world bloom 3 fake event.");
-                    }
-                    int characterId = opts["world_bloom_character_id"].get<int>();
-                    int part = dp.masterData->getWorldBloom3PartByCharacterId(characterId);
-                    eventId = dp.masterData->getWorldBloomFakeEventId(turn, part);
-                } else {
-                    if (!opts.contains("event_unit") || !opts["event_unit"].is_string()) {
-                        throw std::invalid_argument("event_unit is required for world bloom fake event.");
-                    }
-                    std::string eu = opts["event_unit"].get<std::string>();
-                    if (!VALID_UNIT_TYPES.count(eu)) {
-                        throw std::invalid_argument("Invalid event unit: " + eu);
-                    }
-                    eventId = dp.masterData->getWorldBloomFakeEventId(turn, mapEnum(EnumMap::unit, eu));
-                }
-            } else if (opts.contains("event_attr") || opts.contains("event_unit")) {
-                if (!opts.contains("event_attr") || !opts.contains("event_unit")) {
-                    throw std::invalid_argument("event_attr and event_unit must be specified together.");
-                }
-                std::string ea = opts["event_attr"].get<std::string>();
-                std::string eu = opts["event_unit"].get<std::string>();
-                if (!VALID_EVENT_ATTRS.count(ea)) {
-                    throw std::invalid_argument("Invalid event attr: " + ea);
-                }
-                if (!VALID_UNIT_TYPES.count(eu)) {
-                    throw std::invalid_argument("Invalid event unit: " + eu);
-                }
-                eventId = dp.masterData->getUnitAttrFakeEventId(
-                    event_type_enum,
-                    mapEnum(EnumMap::unit, eu),
-                    mapEnum(EnumMap::attr, ea)
-                );
-            } else {
-                eventId = dp.masterData->getNoEventFakeEventId(event_type_enum);
-            }
-        }
-
-        // --- challenge character id ---
-        int challengeCharId = 0;
-        if (opts.contains("challenge_live_character_id") && !opts["challenge_live_character_id"].is_null()) {
-            challengeCharId = opts["challenge_live_character_id"].get<int>();
-            if (challengeCharId < 1 || challengeCharId > 26) {
-                throw std::invalid_argument("Invalid challenge character ID.");
-            }
-        } else if (is_challenge) {
-            throw std::invalid_argument("challenge_live_character_id is required for challenge live.");
-        }
-
-        // --- world bloom character id ---
-        int worldBloomCharId = 0;
-        if (opts.contains("world_bloom_character_id") && !opts["world_bloom_character_id"].is_null()) {
-            worldBloomCharId = opts["world_bloom_character_id"].get<int>();
-            if (worldBloomCharId < 1 || worldBloomCharId > 26) {
-                throw std::invalid_argument("Invalid world bloom character ID.");
-            }
-            findOrThrow(dp.masterData->worldBlooms, [&](const WorldBloom& it) {
-                return it.eventId == eventId && it.gameCharacterId == worldBloomCharId;
-            }, std::string("World bloom chapter not found."));
-        }
-
-        // --- config ---
-        DeckRecommendConfig config{};
-
-        // target
-        if (is_mysekai) {
-            config.target = RecommendTarget::Mysekai;
-        } else {
-            std::string target = json_opt<std::string>(opts, "target").value_or("score");
-            if (!VALID_TARGETS.count(target)) {
-                throw std::invalid_argument("Invalid target: " + target);
-            }
-            if (target == "score") {
-                config.target = RecommendTarget::Score;
-            } else if (target == "skill") {
-                config.target = RecommendTarget::Skill;
-            } else if (target == "power") {
-                config.target = RecommendTarget::Power;
-            } else if (target == "bonus") {
-                config.target = RecommendTarget::Bonus;
-            }
-        }
-
-        // bonus list
-        if (auto target_bonus_list = json_opt<std::vector<int>>(opts, "target_bonus_list")) {
-            if (!target_bonus_list->empty()) {
-                if (config.target != RecommendTarget::Bonus) {
-                    throw std::invalid_argument("target_bonus_list is only valid for bonus target.");
-                }
-                config.bonusList = *target_bonus_list;
-            }
-        }
-
-        apply_custom_bonus_options(config, opts);
-
-        // algorithm
-        std::string algorithm = json_opt<std::string>(opts, "algorithm")
-            .value_or(is_challenge ? "dfs" : "ga");
-        if (!VALID_ALGORITHMS.count(algorithm)) {
-            throw std::invalid_argument("Invalid algorithm: " + algorithm);
-        }
-        if (algorithm == "sa") {
-            config.algorithm = RecommendAlgorithm::SA;
-        } else if (algorithm == "dfs") {
-            config.algorithm = RecommendAlgorithm::DFS;
-        } else if (algorithm == "ga") {
-            config.algorithm = RecommendAlgorithm::GA;
-        } else if (algorithm == "dfs_ga" || algorithm == "dfs-ga") {
-            config.algorithm = RecommendAlgorithm::DFS_GA;
-        } else if (algorithm == "rl") {
-            config.algorithm = RecommendAlgorithm::RL;
-        }
-
-        // filter other unit
-        config.filterOtherUnit = json_opt<bool>(opts, "filter_other_unit").value_or(false);
-
-        // music
-        if (!opts.contains("music_id")) {
-            throw std::invalid_argument("music_id is required.");
-        }
-        if (!opts.contains("music_diff")) {
-            throw std::invalid_argument("music_diff is required.");
-        }
-        config.musicId = opts["music_id"].get<int>();
-        std::string music_diff = opts["music_diff"].get<std::string>();
-        if (!VALID_MUSIC_DIFFS.count(music_diff)) {
-            throw std::invalid_argument("Invalid music difficulty: " + music_diff);
-        }
-        config.musicDiff = mapEnum(EnumMap::musicDifficulty, music_diff);
-        findOrThrow(dp.musicMetas->metas, [&](const MusicMeta& it) {
-            return it.music_id == config.musicId && it.difficulty == config.musicDiff;
-        }, "Music meta not found for musicId: " + std::to_string(config.musicId));
-
-        // limit, member
-        config.limit = json_opt<int>(opts, "limit").value_or(10);
-        if (config.limit < 1) {
-            throw std::invalid_argument("Invalid limit.");
-        }
-        config.member = json_opt<int>(opts, "member").value_or(5);
-        if (config.member < 2 || config.member > 5) {
-            throw std::invalid_argument("Invalid member count.");
-        }
-
-        // fixed cards
-        if (auto fixed_cards = json_opt<std::vector<int>>(opts, "fixed_cards")) {
-            config.fixedCards = *fixed_cards;
-            if ((int)config.fixedCards.size() > config.member) {
-                throw std::invalid_argument("Fixed cards size exceeds member count.");
-            }
-            for (auto cid : config.fixedCards) {
-                findOrThrow(dp.masterData->cards, [&](const Card& it) { return it.id == cid; },
-                    "Invalid fixed card ID: " + std::to_string(cid));
-            }
-        }
-
-        // fixed characters
-        if (auto fixed_characters = json_opt<std::vector<int>>(opts, "fixed_characters")) {
-            config.fixedCharacters = *fixed_characters;
-            if ((int)config.fixedCharacters.size() > config.member) {
-                throw std::invalid_argument("Fixed characters size exceeds member count.");
-            }
-            if (is_challenge) {
-                throw std::invalid_argument("fixed_characters is not valid for challenge live.");
-            }
-            for (auto characterId : config.fixedCharacters) {
-                if (characterId < 1 || characterId > 26) {
-                    throw std::invalid_argument("Invalid fixed character ID: " + std::to_string(characterId));
-                }
-            }
-        }
-
-        // final chapter forced leader
-        const char* forcedLeaderKey = nullptr;
-        if (opts.contains("forced_leader_character_id") && !opts["forced_leader_character_id"].is_null()) {
-            forcedLeaderKey = "forced_leader_character_id";
-        } else if (opts.contains("forcedLeaderCharacterId") && !opts["forcedLeaderCharacterId"].is_null()) {
-            forcedLeaderKey = "forcedLeaderCharacterId";
-        }
-        if (forcedLeaderKey != nullptr) {
-            auto characterId = opts[forcedLeaderKey].get<int>();
-            if (characterId < 1 || characterId > 26) {
-                throw std::invalid_argument("Invalid forced leader character ID: " + std::to_string(characterId));
-            }
-            config.forcedLeaderCharacterId = characterId;
-        }
-
-        // skill reference choose strategy
-        {
-            std::string s = json_opt<std::string>(opts, "skill_reference_choose_strategy").value_or("average");
-            if (!VALID_SKILL_REF_STRATEGIES.count(s)) {
-                throw std::invalid_argument("Invalid skill ref strategy: " + s);
-            }
-            if (s == "average") {
-                config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Average;
-            } else if (s == "max") {
-                config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Max;
-            } else if (s == "min") {
-                config.skillReferenceChooseStrategy = SkillReferenceChooseStrategy::Min;
-            }
-        }
-
-        // keep after training state
-        config.keepAfterTrainingState = json_opt<bool>(opts, "keep_after_training_state").value_or(false);
-
-        // multi live teammate score up
-        if (opts.contains("multi_live_teammate_score_up") && !opts["multi_live_teammate_score_up"].is_null()) {
-            config.multiTeammateScoreUp = opts["multi_live_teammate_score_up"].get<int>();
-            if (!Enums::LiveType::isMulti(liveType)) {
-                throw std::invalid_argument("multi_live_teammate_score_up is only valid for multi live.");
-            }
-        }
-
-        // multi live teammate power
-        if (opts.contains("multi_live_teammate_power") && !opts["multi_live_teammate_power"].is_null()) {
-            config.multiTeammatePower = opts["multi_live_teammate_power"].get<int>();
-            if (!Enums::LiveType::isMulti(liveType)) {
-                throw std::invalid_argument("multi_live_teammate_power is only valid for multi live.");
-            }
-        }
-
-        // best skill as leader
-        config.bestSkillAsLeader = json_opt<bool>(opts, "best_skill_as_leader").value_or(true);
-
-        // multi live score up lower bound
-        if (opts.contains("multi_live_score_up_lower_bound") && !opts["multi_live_score_up_lower_bound"].is_null()) {
-            if (!Enums::LiveType::isMulti(liveType)) {
-                throw std::invalid_argument("multi_live_score_up_lower_bound is only valid for multi live.");
-            }
-            config.multiScoreUpLowerBound = opts["multi_live_score_up_lower_bound"].get<double>();
-        }
-
-        // skill order choose strategy
-        std::string skill_order_choose_strategy = json_opt<std::string>(opts, "skill_order_choose_strategy")
-            .value_or("average");
-        if (!VALID_SKILL_ORDER_STRATEGIES.count(skill_order_choose_strategy)) {
-            throw std::invalid_argument("Invalid skill order strategy: " + skill_order_choose_strategy);
-        }
-        if (skill_order_choose_strategy == "average") {
-            config.liveSkillOrder = LiveSkillOrder::average;
-        } else if (skill_order_choose_strategy == "max") {
-            config.liveSkillOrder = LiveSkillOrder::best;
-        } else if (skill_order_choose_strategy == "min") {
-            config.liveSkillOrder = LiveSkillOrder::worst;
-        } else if (skill_order_choose_strategy == "specific") {
-            config.liveSkillOrder = LiveSkillOrder::specific;
-        }
-
-        // specific skill order
-        if (auto specific_skill_order = json_opt<std::vector<int>>(opts, "specific_skill_order")) {
-            config.specificSkillOrder = *specific_skill_order;
-        }
-
-        // timeout
-        if (opts.contains("timeout_ms") && !opts["timeout_ms"].is_null()) {
-            config.timeout_ms = opts["timeout_ms"].get<int>();
-        } else if (default_timeout_ms > 0) {
-            config.timeout_ms = default_timeout_ms;
-        }
-        config.timeout_ms = std::clamp(config.timeout_ms, 1, kMaxRecommendTimeoutMs);
-
-        // rarity configs
-        for (const auto& rk : {"rarity_1", "rarity_2", "rarity_3", "rarity_birthday", "rarity_4"}) {
-            std::string key = std::string(rk) + "_config";
-            CardConfig cc{};
-            if (opts.contains(key) && opts[key].is_object()) {
-                apply_card_config(cc, opts[key]);
-            }
-            config.cardConfig[mapEnum(EnumMap::cardRarityType, rk)] = cc;
-        }
-
-        // single card configs
-        if (opts.contains("single_card_configs") && opts["single_card_configs"].is_array()) {
-            for (const auto& item : opts["single_card_configs"]) {
-                CardConfig cc{};
-                apply_card_config(cc, item);
-                config.singleCardConfig[item["card_id"].get<int>()] = cc;
-            }
-        }
-        if (opts.contains("support_master_max") && !opts["support_master_max"].is_null()) {
-            config.supportMasterMax = opts["support_master_max"].get<bool>();
-        }
-        if (opts.contains("support_skill_max") && !opts["support_skill_max"].is_null()) {
-            config.supportSkillMax = opts["support_skill_max"].get<bool>();
-        }
-
-        // SA options
-        if (opts.contains("sa_options") && opts["sa_options"].is_object()) {
-            const auto sa = opts["sa_options"];
-            if (sa.contains("run_num")) {
-                config.saRunCount = sa["run_num"].get<int>();
-            }
-            if (config.saRunCount < 1) {
-                throw std::invalid_argument("Invalid sa run count: " + std::to_string(config.saRunCount));
-            }
-
-            if (sa.contains("seed")) {
-                config.saSeed = sa["seed"].get<int>();
-            }
-
-            if (sa.contains("max_iter")) {
-                config.saMaxIter = sa["max_iter"].get<int>();
-            }
-            if (config.saMaxIter < 1) {
-                throw std::invalid_argument("Invalid sa max iter: " + std::to_string(config.saMaxIter));
-            }
-
-            if (sa.contains("max_no_improve_iter")) {
-                config.saMaxIterNoImprove = sa["max_no_improve_iter"].get<int>();
-            }
-            if (config.saMaxIterNoImprove < 1) {
-                throw std::invalid_argument("Invalid sa max no improve iter: " + std::to_string(config.saMaxIterNoImprove));
-            }
-
-            if (sa.contains("time_limit_ms")) {
-                config.saMaxTimeMs = sa["time_limit_ms"].get<int>();
-            }
-            if (config.saMaxTimeMs < 0) {
-                throw std::invalid_argument("Invalid sa max time ms: " + std::to_string(config.saMaxTimeMs));
-            }
-
-            if (sa.contains("start_temprature")) {
-                config.saStartTemperature = sa["start_temprature"].get<double>();
-            } else if (sa.contains("start_temperature")) {
-                config.saStartTemperature = sa["start_temperature"].get<double>();
-            }
-            if (config.saStartTemperature < 0) {
-                throw std::invalid_argument("Invalid sa start temperature: " + std::to_string(config.saStartTemperature));
-            }
-
-            if (sa.contains("cooling_rate")) {
-                config.saCoolingRate = sa["cooling_rate"].get<double>();
-            }
-            if (config.saCoolingRate < 0 || config.saCoolingRate > 1) {
-                throw std::invalid_argument("Invalid sa cooling rate: " + std::to_string(config.saCoolingRate));
-            }
-
-            if (sa.contains("debug")) {
-                config.saDebug = sa["debug"].get<bool>();
-            }
-        }
-
-        // GA options
-        if (opts.contains("ga_options") && opts["ga_options"].is_object()) {
-            const auto ga = opts["ga_options"];
-            if (ga.contains("seed")) {
-                config.gaSeed = ga["seed"].get<int>();
-            }
-            if (ga.contains("debug")) {
-                config.gaDebug = ga["debug"].get<bool>();
-            }
-            if (ga.contains("max_iter")) {
-                config.gaMaxIter = ga["max_iter"].get<int>();
-            }
-            if (ga.contains("max_no_improve_iter")) {
-                config.gaMaxIterNoImprove = ga["max_no_improve_iter"].get<int>();
-            }
-            if (ga.contains("pop_size")) {
-                config.gaPopSize = ga["pop_size"].get<int>();
-            }
-            if (ga.contains("parent_size")) {
-                config.gaParentSize = ga["parent_size"].get<int>();
-            }
-            if (ga.contains("elite_size")) {
-                config.gaEliteSize = ga["elite_size"].get<int>();
-            }
-            if (ga.contains("crossover_rate")) {
-                config.gaCrossoverRate = ga["crossover_rate"].get<double>();
-            }
-            if (ga.contains("base_mutation_rate")) {
-                config.gaBaseMutationRate = ga["base_mutation_rate"].get<double>();
-            }
-            if (ga.contains("no_improve_iter_to_mutation_rate")) {
-                config.gaNoImproveIterToMutationRate = ga["no_improve_iter_to_mutation_rate"].get<double>();
-            }
-        }
+        LiveContext live = resolve_live_context(opts);
+        int event_id = resolve_event_id(opts, dp, live.is_challenge);
+        int challenge_character_id = resolve_challenge_character_id(opts, live.is_challenge);
+        int world_bloom_character_id = resolve_world_bloom_character_id(opts, dp, event_id);
+        DeckRecommendConfig config = build_recommend_config(opts, dp, live, default_timeout_ms);
 
         // --- execute recommendation ---
         // Match the upstream bindings: cost_ms measures only the search
         // algorithm, excluding option/userdata parsing and result conversion.
         auto search_started = std::chrono::steady_clock::now();
-        std::vector<RecommendDeck> result;
-
-        if (config.target == RecommendTarget::Mysekai) {
-            MysekaiDeckRecommend rec(dp);
-            result = rec.recommendMysekaiDeck(eventId, config, worldBloomCharId);
-        } else if (Enums::LiveType::isChallenge(liveType)) {
-            ChallengeLiveDeckRecommend rec(dp);
-            result = rec.recommendChallengeLiveDeck(liveType, challengeCharId, config);
-        } else {
-            EventDeckRecommend rec(dp);
-            result = rec.recommendEventDeck(eventId, liveType, config, worldBloomCharId);
-        }
+        auto result = execute_recommendation(
+            dp,
+            event_id,
+            challenge_character_id,
+            world_bloom_character_id,
+            live,
+            config
+        );
         double cost_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - search_started
         ).count();
-
-        MutableJsonDoc out_doc;
-        yyjson_mut_val* result_json = json_object(out_doc.get());
-        yyjson_mut_val* decks_json = json_array(out_doc.get());
-        for (const auto& deck : result) {
-            json_array_append(decks_json, recommend_deck_to_json(out_doc.get(), deck));
-        }
-        json_add_value(out_doc.get(), result_json, "decks", decks_json);
-        json_add(out_doc.get(), result_json, "cost_ms", cost_ms);
-        return dump_mutable_json(result_json);
+        return serialize_recommendation_result(result, cost_ms);
     }
 
     std::string recommend_batch(
@@ -1525,14 +1760,8 @@ public:
     }
 
     std::string get_world_bloom_support_cards(const json_view& opts) {
-        if (!opts.contains("region") || !opts["region"].is_string()) {
-            throw std::invalid_argument("region is required.");
-        }
-        std::string region_str = opts["region"].get<std::string>();
-        if (!REGION_MAP.count(region_str)) {
-            throw std::invalid_argument("Invalid region: " + region_str);
-        }
-        Region region = REGION_MAP.at(region_str);
+        std::string region_str = require_string_field(opts, "region");
+        Region region = resolve_region(region_str);
 
         auto masterdata = shared_region_data_store().get_masterdata(region);
         if (!masterdata) {
@@ -1540,55 +1769,8 @@ public:
         }
 
         auto userdata = resolve_userdata(opts);
-
-        int eventId = 0;
-        auto event_id = json_opt<int>(opts, "event_id");
-        auto world_bloom_turn = json_opt<int>(opts, "world_bloom_event_turn");
-        auto world_bloom_character = json_opt<int>(opts, "world_bloom_character_id");
-        auto event_unit = json_opt<std::string>(opts, "event_unit");
-
-        if (event_id.has_value()) {
-            eventId = *event_id;
-        } else if (world_bloom_turn.has_value()) {
-            int turn = *world_bloom_turn;
-            if (turn < 1 || turn > 3) {
-                throw std::invalid_argument("Invalid world bloom event turn: " + std::to_string(turn));
-            }
-            if (turn == 3) {
-                if (!world_bloom_character.has_value()) {
-                    throw std::invalid_argument("world_bloom_character_id is required for world bloom 3 fake event.");
-                }
-                int part = masterdata->getWorldBloom3PartByCharacterId(*world_bloom_character);
-                eventId = masterdata->getWorldBloomFakeEventId(turn, part);
-            } else {
-                if (!event_unit.has_value()) {
-                    throw std::invalid_argument("event_unit is required for world bloom fake event.");
-                }
-                if (!VALID_UNIT_TYPES.count(*event_unit)) {
-                    throw std::invalid_argument("Invalid event unit: " + *event_unit);
-                }
-                eventId = masterdata->getWorldBloomFakeEventId(turn, mapEnum(EnumMap::unit, *event_unit));
-            }
-        } else {
-            throw std::invalid_argument("event_id or world_bloom_event_turn is required.");
-        }
-
-        int characterId = 0;
-        if (world_bloom_character.has_value()) {
-            characterId = *world_bloom_character;
-        } else if (auto forced = json_opt<int>(opts, "forced_leader_character_id")) {
-            characterId = *forced;
-        } else if (auto forced = json_opt<int>(opts, "forcedLeaderCharacterId")) {
-            characterId = *forced;
-        }
-        if (characterId == 0) {
-            throw std::invalid_argument("world_bloom_character_id or forcedLeaderCharacterId is required.");
-        }
-        if (characterId < 1 || characterId > 26) {
-            throw std::invalid_argument(
-                "Invalid world_bloom_character_id or forcedLeaderCharacterId: " + std::to_string(characterId)
-            );
-        }
+        int event_id = resolve_support_event_id(opts, *masterdata);
+        int character_id = resolve_support_character_id(opts);
 
         auto musicmetas = shared_region_data_store().get_musicmetas(region);
         if (!musicmetas) {
@@ -1607,8 +1789,8 @@ public:
         for (const auto& card : userdata->userCards) {
             auto support_card = cardCalculator.getSupportDeckCard(
                 card,
-                eventId,
-                characterId,
+                event_id,
+                character_id,
                 supportMasterMax,
                 supportSkillMax,
                 !filterOtherUnit
@@ -1633,6 +1815,17 @@ public:
 
 // ---- C API implementation ----
 
+struct DeckRecommendOpaque {
+    SekaiDeckRecommendC engine;
+};
+
+static SekaiDeckRecommendC& engine_from_handle(DeckRecommendHandle handle) {
+    if (!handle) {
+        throw std::invalid_argument("deck recommend handle is required.");
+    }
+    return handle->engine;
+}
+
 extern "C" {
 
 const char* deck_recommend_init_data_path(const char* path) {
@@ -1646,19 +1839,19 @@ const char* deck_recommend_init_data_path(const char* path) {
 
 DeckRecommendHandle deck_recommend_create(void) {
     try {
-        return static_cast<DeckRecommendHandle>(new SekaiDeckRecommendC());
+        return std::make_unique<DeckRecommendOpaque>().release();
     } catch (...) {
         return nullptr;
     }
 }
 
 void deck_recommend_destroy(DeckRecommendHandle handle) {
-    delete static_cast<SekaiDeckRecommendC*>(handle);
+    std::unique_ptr<DeckRecommendOpaque> owned_handle(handle);
 }
 
 const char* deck_recommend_update_masterdata(DeckRecommendHandle handle, const char* base_dir, const char* region) {
     try {
-        static_cast<SekaiDeckRecommendC*>(handle)->update_masterdata(base_dir, region);
+        engine_from_handle(handle).update_masterdata(base_dir, region);
         return nullptr;
     } catch (const std::exception& e) {
         return alloc_error(e.what());
@@ -1669,7 +1862,7 @@ const char* deck_recommend_update_masterdata_from_json(DeckRecommendHandle handl
     return deck_recommend_update_masterdata_from_json_n(
         handle,
         json_map,
-        json_map ? std::strlen(json_map) : 0,
+        nullable_cstr_size(json_map),
         region
     );
 }
@@ -1698,7 +1891,7 @@ const char* deck_recommend_update_masterdata_from_json_n(
             json_view value(yyjson_obj_iter_get_val(key));
             data[raw_key] = value.is_string() ? value.get<std::string>() : dump_json(value);
         }
-        static_cast<SekaiDeckRecommendC*>(handle)->update_masterdata_from_strings(data, region);
+        engine_from_handle(handle).update_masterdata_from_strings(data, region);
         return nullptr;
     } catch (const std::exception& e) {
         return alloc_error(e.what());
@@ -1707,7 +1900,7 @@ const char* deck_recommend_update_masterdata_from_json_n(
 
 const char* deck_recommend_update_musicmetas(DeckRecommendHandle handle, const char* file_path, const char* region) {
     try {
-        static_cast<SekaiDeckRecommendC*>(handle)->update_musicmetas_file(file_path, region);
+        engine_from_handle(handle).update_musicmetas_file(file_path, region);
         return nullptr;
     } catch (const std::exception& e) {
         return alloc_error(e.what());
@@ -1718,7 +1911,7 @@ const char* deck_recommend_update_musicmetas_from_string(DeckRecommendHandle han
     return deck_recommend_update_musicmetas_from_string_n(
         handle,
         json_str,
-        json_str ? std::strlen(json_str) : 0,
+        nullable_cstr_size(json_str),
         region
     );
 }
@@ -1754,7 +1947,7 @@ const char* deck_recommend_cache_userdata(DeckRecommendHandle handle, const char
     return deck_recommend_cache_userdata_n(
         handle,
         userdata_json,
-        userdata_json ? std::strlen(userdata_json) : 0,
+        nullable_cstr_size(userdata_json),
         hash_out,
         nullptr
     );
@@ -1771,7 +1964,7 @@ const char* deck_recommend_cache_userdata_n(
         if (!userdata_json || userdata_json_len == 0) {
             throw std::invalid_argument("userdata_json is required.");
         }
-        auto userdata_hash = static_cast<SekaiDeckRecommendC*>(handle)->cache_userdata(
+        auto userdata_hash = engine_from_handle(handle).cache_userdata(
             std::string_view(userdata_json, userdata_json_len)
         );
         if (hash_out) {
@@ -1789,7 +1982,7 @@ const char* deck_recommend_attach_cached_userdata(DeckRecommendHandle handle, co
     return deck_recommend_attach_cached_userdata_n(
         handle,
         userdata_hash,
-        userdata_hash ? std::strlen(userdata_hash) : 0
+        nullable_cstr_size(userdata_hash)
     );
 }
 
@@ -1802,7 +1995,7 @@ const char* deck_recommend_attach_cached_userdata_n(
         if (!userdata_hash || userdata_hash_len == 0) {
             throw std::invalid_argument("userdata_hash is required.");
         }
-        static_cast<SekaiDeckRecommendC*>(handle)->attach_cached_userdata(
+        engine_from_handle(handle).attach_cached_userdata(
             std::string_view(userdata_hash, userdata_hash_len)
         );
         return nullptr;
@@ -1815,7 +2008,7 @@ const char* deck_recommend_recommend(DeckRecommendHandle handle, const char* opt
     return deck_recommend_recommend_n(
         handle,
         options_json,
-        options_json ? std::strlen(options_json) : 0,
+        nullable_cstr_size(options_json),
         error_out,
         nullptr
     );
@@ -1830,7 +2023,7 @@ const char* deck_recommend_recommend_n(
 ) {
     try {
         auto doc = parse_json_bytes(options_json, options_json_len, "recommend options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend(doc.root());
+        auto result = engine_from_handle(handle).recommend(doc.root());
         return alloc_cstr(result, result_len_out);
     } catch (const std::exception& e) {
         if (error_out) {
@@ -1849,7 +2042,7 @@ const char* deck_recommend_recommend_with_default_timeout(
     return deck_recommend_recommend_with_default_timeout_n(
         handle,
         options_json,
-        options_json ? std::strlen(options_json) : 0,
+        nullable_cstr_size(options_json),
         default_timeout_ms,
         error_out,
         nullptr
@@ -1866,7 +2059,7 @@ const char* deck_recommend_recommend_with_default_timeout_n(
 ) {
     try {
         auto doc = parse_json_bytes(options_json, options_json_len, "recommend options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend(doc.root(), default_timeout_ms);
+        auto result = engine_from_handle(handle).recommend(doc.root(), default_timeout_ms);
         return alloc_cstr(result, result_len_out);
     } catch (const std::exception& e) {
         if (error_out) {
@@ -1887,11 +2080,11 @@ const char* deck_recommend_recommend_with_context(
     return deck_recommend_recommend_with_context_n(
         handle,
         options_json,
-        options_json ? std::strlen(options_json) : 0,
+        nullable_cstr_size(options_json),
         forced_region,
-        forced_region ? std::strlen(forced_region) : 0,
+        nullable_cstr_size(forced_region),
         forced_userdata_hash,
-        forced_userdata_hash ? std::strlen(forced_userdata_hash) : 0,
+        nullable_cstr_size(forced_userdata_hash),
         default_timeout_ms,
         error_out,
         nullptr
@@ -1918,7 +2111,7 @@ const char* deck_recommend_recommend_with_context_n(
             forced_userdata_hash = nullptr;
         }
         auto doc = parse_json_bytes(options_json, options_json_len, "recommend options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend(
+        auto result = engine_from_handle(handle).recommend(
             doc.root(),
             default_timeout_ms,
             forced_region,
@@ -1949,7 +2142,7 @@ const char* deck_recommend_recommend_batch_with_context_n(
 ) {
     try {
         auto doc = parse_json_bytes(options_json, options_json_len, "batch recommend options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->recommend_batch(
+        auto result = engine_from_handle(handle).recommend_batch(
             doc.root(),
             default_timeout_ms,
             forced_region,
@@ -1970,7 +2163,7 @@ const char* deck_recommend_calculate(DeckRecommendHandle handle, const char* opt
     return deck_recommend_calculate_n(
         handle,
         options_json,
-        options_json ? std::strlen(options_json) : 0,
+        nullable_cstr_size(options_json),
         error_out,
         nullptr
     );
@@ -1985,7 +2178,7 @@ const char* deck_recommend_calculate_n(
 ) {
     try {
         auto doc = parse_json_bytes(options_json, options_json_len, "calculate options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->calculate(doc.root());
+        auto result = engine_from_handle(handle).calculate(doc.root());
         return alloc_cstr(result, result_len_out);
     } catch (const std::exception& e) {
         if (error_out) {
@@ -1999,7 +2192,7 @@ const char* deck_recommend_get_world_bloom_support_cards(DeckRecommendHandle han
     return deck_recommend_get_world_bloom_support_cards_n(
         handle,
         options_json,
-        options_json ? std::strlen(options_json) : 0,
+        nullable_cstr_size(options_json),
         error_out,
         nullptr
     );
@@ -2014,7 +2207,7 @@ const char* deck_recommend_get_world_bloom_support_cards_n(
 ) {
     try {
         auto doc = parse_json_bytes(options_json, options_json_len, "world bloom support options");
-        auto result = static_cast<SekaiDeckRecommendC*>(handle)->get_world_bloom_support_cards(doc.root());
+        auto result = engine_from_handle(handle).get_world_bloom_support_cards(doc.root());
         return alloc_cstr(result, result_len_out);
     } catch (const std::exception& e) {
         if (error_out) {
@@ -2025,7 +2218,7 @@ const char* deck_recommend_get_world_bloom_support_cards_n(
 }
 
 void deck_recommend_free_string(const char* str) {
-    std::free(const_cast<char*>(str));
+    std::unique_ptr<const char[]> owned_string(str);
 }
 
 } // extern "C"

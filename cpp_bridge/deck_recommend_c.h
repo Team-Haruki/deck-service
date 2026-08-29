@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-// Opaque handle to SekaiDeckRecommend instance
-typedef void* DeckRecommendHandle;
+// Opaque handle to a SekaiDeckRecommend instance.
+typedef struct DeckRecommendOpaque* DeckRecommendHandle;
 
 // Initialize the static data directory (must be called before any other function)
 // Returns NULL on success, or an error message string (caller must free with deck_recommend_free_string)

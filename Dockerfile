@@ -11,7 +11,8 @@ RUN case "$(uname -m)" in \
       aarch64) ZIG_ARCH=aarch64 ;; \
       *) echo "Unsupported arch: $(uname -m)" && exit 1 ;; \
     esac && \
-    curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 -fsSL \
+    curl --proto '=https' --proto-redir '=https' \
+      --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 600 -fsSL \
       -o /tmp/zig.tar.xz \
       "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" && \
     tar -xJf /tmp/zig.tar.xz -C /usr/local && \
@@ -54,6 +55,8 @@ COPY --from=builder /data /data
 
 ENV DECK_DATA_DIR=/data
 ENV BIND_ADDR=0.0.0.0:3000
+
+USER 65532:65532
 
 EXPOSE 3000
 

@@ -17,6 +17,36 @@ void expect_error(Fn&& fn, std::string_view expected) {
     }
 }
 
+template <typename Fn>
+void expect_any_error(Fn&& fn) {
+    try {
+        fn();
+        assert(false && "expected an exception");
+    } catch (const std::exception&) {
+    }
+}
+
+void expect_c_error(const char* error, std::string_view expected) {
+    assert(error != nullptr);
+    assert(std::string_view(error).find(expected) != std::string_view::npos);
+    deck_recommend_free_string(error);
+}
+
+std::string minimal_userdata() {
+    return R"({
+        "userGamedata":{"userId":1},
+        "userAreas":[],
+        "userCards":[],
+        "userChallengeLiveSoloDecks":[],
+        "userCharacters":[],
+        "userDecks":[],
+        "userHonors":[],
+        "userMysekaiCanvases":[],
+        "userMysekaiFixtureGameCharacterPerformanceBonuses":[],
+        "userMysekaiGates":[]
+    })";
+}
+
 json_doc parse(std::string_view text) {
     return parse_json_bytes(text.data(), text.size(), "unit test JSON");
 }
@@ -427,6 +457,127 @@ void test_validation_paths() {
     );
 }
 
+void test_userdata_and_calculation_paths() {
+    SekaiDeckRecommendC bridge;
+    auto empty = parse(R"({})");
+    expect_error(
+        [&] { bridge.resolve_userdata(empty.root()); },
+        "Either userdata_hash"
+    );
+    expect_error(
+        [&] { bridge.resolve_userdata(empty.root(), "missing", 7); },
+        "User data not found"
+    );
+
+    auto unknown_hash = parse(R"({"userdata_hash":"missing"})");
+    expect_error(
+        [&] { bridge.resolve_userdata(unknown_hash.root()); },
+        "User data not found"
+    );
+
+    auto direct_userdata = parse(
+        std::string(R"({"user_data":)") + minimal_userdata() + "}"
+    );
+    auto userdata = bridge.resolve_userdata(direct_userdata.root());
+    assert(userdata != nullptr);
+
+    auto invalid_region = parse(R"({"region":"invalid"})");
+    expect_error(
+        [&] { bridge.build_data_provider(invalid_region.root(), false); },
+        "Invalid region"
+    );
+
+    auto missing_masterdata = parse(
+        std::string(R"({"region":"cn","user_data":)") + minimal_userdata() + "}"
+    );
+    expect_error(
+        [&] { bridge.build_data_provider(missing_masterdata.root(), false); },
+        "Master data not found"
+    );
+
+    shared_region_data_store().set_masterdata(
+        Region::KR,
+        std::make_shared<MasterData>()
+    );
+    auto provider_options = parse(
+        std::string(R"({"region":"kr","user_data":)") + minimal_userdata() + "}"
+    );
+    auto provider = bridge.build_data_provider(provider_options.root(), false);
+    assert(provider.region == Region::KR);
+
+    auto challenge = parse(R"({})");
+    expect_error(
+        [&] { bridge.resolve_fixed_deck_cards(provider, challenge.root(), "challenge"); },
+        "character_id is required"
+    );
+    expect_error(
+        [&] { bridge.resolve_fixed_deck_cards(provider, challenge.root(), "deck"); },
+        "deck_id is required"
+    );
+    expect_error(
+        [&] { bridge.resolve_fixed_deck_cards(provider, challenge.root(), "live_full"); },
+        "Either deck_id or character_id is required"
+    );
+    expect_error(
+        [&] { bridge.calculate_fixed_deck_detail(provider, {}); },
+        "fixed deck contains no cards"
+    );
+
+    expect_any_error(
+        [&] { bridge.update_masterdata("/path/that/does/not/exist", "cn"); }
+    );
+    expect_any_error(
+        [&] { bridge.update_musicmetas_file("/path/that/does/not/exist", "cn"); }
+    );
+
+    SekaiDeckRecommendC producer;
+    auto userdata_hash = producer.cache_userdata(minimal_userdata());
+    SekaiDeckRecommendC consumer;
+    auto invalid_batch_entry = parse(R"([1])");
+    expect_error(
+        [&] {
+            consumer.recommend_batch(
+                invalid_batch_entry.root(),
+                0,
+                "jp",
+                userdata_hash.c_str(),
+                2,
+                userdata_hash.size()
+            );
+        },
+        "entries must be objects"
+    );
+}
+
+void test_legacy_update_entry_points() {
+    expect_c_error(
+        deck_recommend_update_masterdata(nullptr, "", "jp"),
+        "handle is required"
+    );
+    expect_c_error(
+        deck_recommend_update_masterdata_from_json(nullptr, "[]", "jp"),
+        "must be an object"
+    );
+    expect_c_error(
+        deck_recommend_update_musicmetas(nullptr, "", "jp"),
+        "handle is required"
+    );
+    expect_c_error(
+        deck_recommend_update_musicmetas_from_string(nullptr, "", "jp"),
+        "Failed to load music metas"
+    );
+
+    const char* hash = nullptr;
+    expect_c_error(
+        deck_recommend_cache_userdata(nullptr, "", &hash),
+        "userdata_json is required"
+    );
+    expect_c_error(
+        deck_recommend_attach_cached_userdata(nullptr, ""),
+        "userdata_hash is required"
+    );
+}
+
 } // namespace
 
 int main() {
@@ -435,6 +586,8 @@ int main() {
     test_live_skill_parser();
     test_configuration_helpers();
     test_validation_paths();
+    test_userdata_and_calculation_paths();
+    test_legacy_update_entry_points();
     std::cout << "C++ bridge unit tests passed\n";
     return 0;
 }

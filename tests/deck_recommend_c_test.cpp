@@ -3,6 +3,8 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -382,6 +384,34 @@ void test_validation_paths() {
         ) == 21
     );
 
+    auto third_turn = parse(
+        R"({"world_bloom_event_turn":3,"world_bloom_character_id":21})"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_world_bloom_fake_event_id(
+            third_turn.root(),
+            provider
+        ) > 0
+    );
+    auto first_turn = parse(
+        R"({"world_bloom_event_turn":1,"event_unit":"idol"})"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_world_bloom_fake_event_id(
+            first_turn.root(),
+            provider
+        ) > 0
+    );
+    auto unit_attr_event = parse(
+        R"({"event_type":"marathon","event_attr":"cool","event_unit":"idol"})"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_fake_event_id(
+            unit_attr_event.root(),
+            provider
+        ) > 0
+    );
+
     expect_error(
         [&] { SekaiDeckRecommendC::resolve_support_event_id(empty.root(), *masterdata); },
         "event_id or world_bloom_event_turn is required"
@@ -427,6 +457,30 @@ void test_validation_paths() {
             );
         },
         "Invalid event unit"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_support_event_id(
+            third_turn.root(),
+            *masterdata
+        ) > 0
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_support_event_id(
+            first_turn.root(),
+            *masterdata
+        ) > 0
+    );
+
+    auto challenge_fixed_character = parse(R"({"fixed_characters":[1]})");
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::apply_fixed_character_options(
+                config,
+                challenge_fixed_character.root(),
+                true
+            );
+        },
+        "fixed_characters is not valid for challenge live"
     );
 
     expect_error(
@@ -481,6 +535,24 @@ void test_userdata_and_calculation_paths() {
     auto userdata = bridge.resolve_userdata(direct_userdata.root());
     assert(userdata != nullptr);
 
+    auto userdata_string = parse(R"({"user_data_str":"not-json"})");
+    expect_error(
+        [&] { bridge.resolve_userdata(userdata_string.root()); },
+        "Failed to load user data from bytes"
+    );
+
+    const char* userdata_path = "/tmp/deck-service-userdata-unit.json";
+    {
+        std::ofstream userdata_file(userdata_path);
+        userdata_file << minimal_userdata();
+    }
+    auto userdata_file = parse(
+        std::string(R"({"user_data_file_path":")") + userdata_path + R"("})"
+    );
+    auto loaded_userdata = bridge.resolve_userdata(userdata_file.root());
+    assert(loaded_userdata->path == userdata_path);
+    assert(std::remove(userdata_path) == 0);
+
     auto invalid_region = parse(R"({"region":"invalid"})");
     expect_error(
         [&] { bridge.build_data_provider(invalid_region.root(), false); },
@@ -505,6 +577,18 @@ void test_userdata_and_calculation_paths() {
     auto provider = bridge.build_data_provider(provider_options.root(), false);
     assert(provider.region == Region::KR);
 
+    shared_region_data_store().set_masterdata(
+        Region::EN,
+        std::make_shared<MasterData>()
+    );
+    auto missing_musicmetas = parse(
+        std::string(R"({"region":"en","user_data":)") + minimal_userdata() + "}"
+    );
+    expect_error(
+        [&] { bridge.build_data_provider(missing_musicmetas.root(), true); },
+        "Music metas not found"
+    );
+
     auto challenge = parse(R"({})");
     expect_error(
         [&] { bridge.resolve_fixed_deck_cards(provider, challenge.root(), "challenge"); },
@@ -517,6 +601,54 @@ void test_userdata_and_calculation_paths() {
     expect_error(
         [&] { bridge.resolve_fixed_deck_cards(provider, challenge.root(), "live_full"); },
         "Either deck_id or character_id is required"
+    );
+
+    UserCard card{};
+    card.userId = 1;
+    card.cardId = 1;
+    provider.userData->userCards.push_back(card);
+    UserChallengeLiveSoloDeck challenge_deck{};
+    challenge_deck.characterId = 21;
+    challenge_deck.leader = 1;
+    provider.userData->userChallengeLiveSoloDecks.push_back(challenge_deck);
+    UserDeck deck{};
+    deck.deckId = 1;
+    deck.member1 = 1;
+    deck.member2 = 1;
+    deck.member3 = 1;
+    deck.member4 = 1;
+    deck.member5 = 1;
+    provider.userData->userDecks.push_back(deck);
+
+    auto challenge_options = parse(R"({"character_id":21})");
+    assert(
+        bridge.resolve_fixed_deck_cards(
+            provider,
+            challenge_options.root(),
+            "challenge"
+        ).size() == 1
+    );
+    assert(
+        bridge.resolve_fixed_deck_cards(
+            provider,
+            challenge_options.root(),
+            "live_full"
+        ).size() == 1
+    );
+    auto deck_options = parse(R"({"deck_id":1})");
+    assert(
+        bridge.resolve_fixed_deck_cards(
+            provider,
+            deck_options.root(),
+            "deck"
+        ).size() == 5
+    );
+    assert(
+        bridge.resolve_fixed_deck_cards(
+            provider,
+            deck_options.root(),
+            "live_full"
+        ).size() == 5
     );
     expect_error(
         [&] { bridge.calculate_fixed_deck_detail(provider, {}); },

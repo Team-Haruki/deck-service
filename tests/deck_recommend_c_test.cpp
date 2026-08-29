@@ -284,6 +284,149 @@ void test_configuration_helpers() {
     assert(SekaiDeckRecommendC::resolve_support_character_id(support_character_camel.root()) == 22);
 }
 
+void test_validation_paths() {
+    auto masterdata = std::make_shared<MasterData>();
+    WorldBloom world_bloom{};
+    world_bloom.eventId = 20;
+    world_bloom.gameCharacterId = 21;
+    masterdata->worldBlooms.push_back(world_bloom);
+
+    DataProvider provider{
+        Region::JP,
+        masterdata,
+        std::make_shared<UserData>(),
+        std::make_shared<MusicMetas>(),
+    };
+    DeckRecommendConfig config{};
+
+    auto empty = parse(R"({})");
+    SekaiDeckRecommendC::apply_custom_bonus_support_units(config, empty.root());
+    SekaiDeckRecommendC::apply_fixed_card_options(config, empty.root(), provider);
+    SekaiDeckRecommendC::apply_fixed_character_options(config, empty.root(), false);
+    SekaiDeckRecommendC::apply_forced_leader_option(config, empty.root());
+    SekaiDeckRecommendC::apply_sa_options(config, empty.root());
+    SekaiDeckRecommendC::apply_ga_options(config, empty.root());
+    expect_error(
+        [&] { SekaiDeckRecommendC::resolve_live_context(empty.root()); },
+        "live_type is required"
+    );
+
+    auto bad_support_key = parse(
+        R"({"custom_bonus_character_support_units":{"21x":"leo_need"}})"
+    );
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::apply_custom_bonus_support_units(
+                config,
+                bad_support_key.root()
+            );
+        },
+        "Invalid custom bonus support unit character ID key"
+    );
+
+    auto challenge_character = parse(R"({"challenge_live_character_id":21})");
+    assert(
+        SekaiDeckRecommendC::resolve_challenge_character_id(
+            challenge_character.root(),
+            true
+        ) == 21
+    );
+
+    auto invalid_world_bloom_character = parse(R"({"world_bloom_character_id":0})");
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_world_bloom_character_id(
+                invalid_world_bloom_character.root(),
+                provider,
+                20
+            );
+        },
+        "Invalid world bloom character ID"
+    );
+    auto world_bloom_character = parse(R"({"world_bloom_character_id":21})");
+    assert(
+        SekaiDeckRecommendC::resolve_world_bloom_character_id(
+            world_bloom_character.root(),
+            provider,
+            20
+        ) == 21
+    );
+
+    expect_error(
+        [&] { SekaiDeckRecommendC::resolve_support_event_id(empty.root(), *masterdata); },
+        "event_id or world_bloom_event_turn is required"
+    );
+    auto invalid_turn = parse(R"({"world_bloom_event_turn":0})");
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_event_id(
+                invalid_turn.root(),
+                *masterdata
+            );
+        },
+        "Invalid world bloom event turn"
+    );
+    auto third_turn_without_character = parse(R"({"world_bloom_event_turn":3})");
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_event_id(
+                third_turn_without_character.root(),
+                *masterdata
+            );
+        },
+        "world_bloom_character_id is required"
+    );
+    auto first_turn_without_unit = parse(R"({"world_bloom_event_turn":1})");
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_event_id(
+                first_turn_without_unit.root(),
+                *masterdata
+            );
+        },
+        "event_unit is required"
+    );
+    auto invalid_unit = parse(
+        R"({"world_bloom_event_turn":1,"event_unit":"invalid"})"
+    );
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_event_id(
+                invalid_unit.root(),
+                *masterdata
+            );
+        },
+        "Invalid event unit"
+    );
+
+    expect_error(
+        [&] { SekaiDeckRecommendC::resolve_support_character_id(empty.root()); },
+        "world_bloom_character_id or forcedLeaderCharacterId is required"
+    );
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_character_id(
+                invalid_world_bloom_character.root()
+            );
+        },
+        "Invalid world_bloom_character_id or forcedLeaderCharacterId"
+    );
+
+    SekaiDeckRecommendC bridge;
+    expect_error(
+        [&] { bridge.update_masterdata("", "invalid"); },
+        "Invalid region"
+    );
+    expect_error(
+        [&] { bridge.update_musicmetas_file("", "invalid"); },
+        "Invalid region"
+    );
+    expect_error(
+        [&] { bridge.attach_cached_userdata(""); },
+        "userdata_hash is required"
+    );
+}
+
 } // namespace
 
 int main() {
@@ -291,6 +434,7 @@ int main() {
     test_result_serializers();
     test_live_skill_parser();
     test_configuration_helpers();
+    test_validation_paths();
     std::cout << "C++ bridge unit tests passed\n";
     return 0;
 }

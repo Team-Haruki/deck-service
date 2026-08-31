@@ -412,9 +412,42 @@ void test_validation_paths() {
         ) > 0
     );
 
+    auto finale = parse(
+        R"({"world_bloom_finale_turn":3,"world_bloom_character_id":22})"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_fake_event_id(finale.root(), provider)
+        == masterdata->getWorldBloomFakeFinaleEventId(3)
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_world_bloom_character_id(
+            finale.root(),
+            provider,
+            masterdata->getWorldBloomFakeFinaleEventId(3)
+        ) == 22
+    );
+    auto invalid_finale = parse(R"({"world_bloom_finale_turn":1})");
+    expect_error(
+        [&] { SekaiDeckRecommendC::resolve_fake_event_id(invalid_finale.root(), provider); },
+        "Invalid world bloom finale turn"
+    );
+
     expect_error(
         [&] { SekaiDeckRecommendC::resolve_support_event_id(empty.root(), *masterdata); },
-        "event_id or world_bloom_event_turn is required"
+        "event_id, world_bloom_event_turn, or world_bloom_finale_turn is required"
+    );
+    assert(
+        SekaiDeckRecommendC::resolve_support_event_id(finale.root(), *masterdata)
+        == masterdata->getWorldBloomFakeFinaleEventId(3)
+    );
+    expect_error(
+        [&] {
+            SekaiDeckRecommendC::resolve_support_event_id(
+                invalid_finale.root(),
+                *masterdata
+            );
+        },
+        "Invalid world bloom finale turn"
     );
     auto invalid_turn = parse(R"({"world_bloom_event_turn":0})");
     expect_error(

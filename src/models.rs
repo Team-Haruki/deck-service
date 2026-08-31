@@ -125,6 +125,8 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub world_bloom_event_turn: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_bloom_finale_turn: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub world_bloom_character_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub challenge_live_character_id: Option<i32>,
@@ -221,6 +223,8 @@ pub struct WorldBloomSupportOptions {
     pub event_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub world_bloom_event_turn: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_bloom_finale_turn: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub world_bloom_character_id: Option<i32>,
     #[serde(

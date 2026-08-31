@@ -965,6 +965,15 @@ public:
     }
 
     static int resolve_fake_event_id(const json_view& opts, const DataProvider& dp) {
+        if (auto finale_turn = json_opt<int>(opts, "world_bloom_finale_turn")) {
+            if (*finale_turn < 2 || *finale_turn > 3) {
+                throw std::invalid_argument("Invalid world bloom finale turn.");
+            }
+            return *finale_turn == 2
+                ? legacyWorldBloom2FinaleEventId
+                : dp.masterData->getWorldBloomFakeFinaleEventId(*finale_turn);
+        }
+
         std::string event_type = json_opt<std::string>(opts, "event_type").value_or("marathon");
         if (!VALID_EVENT_TYPES.count(event_type)) {
             throw std::invalid_argument("Invalid event type: " + event_type);
@@ -1043,10 +1052,12 @@ public:
         if (*character_id < 1 || *character_id > 26) {
             throw std::invalid_argument("Invalid world bloom character ID.");
         }
-        findOrThrow(dp.masterData->worldBlooms, [&](const WorldBloom& world_bloom) {
-            return world_bloom.eventId == event_id
-                && world_bloom.gameCharacterId == *character_id;
-        }, std::string("World bloom chapter not found."));
+        if (!json_opt<int>(opts, "world_bloom_finale_turn").has_value()) {
+            findOrThrow(dp.masterData->worldBlooms, [&](const WorldBloom& world_bloom) {
+                return world_bloom.eventId == event_id
+                    && world_bloom.gameCharacterId == *character_id;
+            }, std::string("World bloom chapter not found."));
+        }
         return *character_id;
     }
 
@@ -1440,9 +1451,21 @@ public:
         if (auto event_id = json_opt<int>(opts, "event_id")) {
             return *event_id;
         }
+        if (auto finale_turn = json_opt<int>(opts, "world_bloom_finale_turn")) {
+            if (*finale_turn < 2 || *finale_turn > 3) {
+                throw std::invalid_argument(
+                    "Invalid world bloom finale turn: " + std::to_string(*finale_turn)
+                );
+            }
+            return *finale_turn == 2
+                ? legacyWorldBloom2FinaleEventId
+                : masterdata.getWorldBloomFakeFinaleEventId(*finale_turn);
+        }
         auto turn = json_opt<int>(opts, "world_bloom_event_turn");
         if (!turn.has_value()) {
-            throw std::invalid_argument("event_id or world_bloom_event_turn is required.");
+            throw std::invalid_argument(
+                "event_id, world_bloom_event_turn, or world_bloom_finale_turn is required."
+            );
         }
         if (*turn < 1 || *turn > 3) {
             throw std::invalid_argument(

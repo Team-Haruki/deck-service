@@ -302,6 +302,19 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
         changed(base.clone(), "world_bloom_event_turn", json!(3)),
         "world_bloom_character_id is required",
     );
+    expect_recommend_error(
+        &second_engine,
+        changed(base.clone(), "world_bloom_finale_turn", json!(1)),
+        "Invalid world bloom finale turn",
+    );
+    let finale = changed(
+        changed(base.clone(), "world_bloom_finale_turn", json!(3)),
+        "world_bloom_character_id",
+        json!(21),
+    );
+    if let Err(error) = call_recommend(&second_engine, &finale) {
+        assert!(!error.contains("World bloom chapter not found"));
+    }
 
     let challenge = changed(base.clone(), "live_type", json!("challenge"));
     expect_recommend_error(
@@ -513,6 +526,19 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
         )
         .unwrap();
     assert_eq!(support, "[]");
+
+    let finale_support = second_engine
+        .get_world_bloom_support_cards_raw(
+            &sonic_rs::to_string(&json!({
+                "region": "jp",
+                "userdata_hash": active_hash,
+                "world_bloom_finale_turn": 3,
+                "forced_leader_character_id": 21
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(finale_support, "[]");
 }
 
 unsafe fn take_c_string(ptr: *const c_char) -> Option<String> {

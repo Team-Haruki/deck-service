@@ -139,7 +139,7 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `b2387b7f09e5a420c9bfee9ece8903b345dd39cd`;
+`master` at commit `46c3d60d7b712bcf382af9acfa71180571b95490`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 
@@ -185,6 +185,7 @@ Content-Type: application/json
 | `event_unit` | `string` | Event unit |
 | `event_type` | `string` | Event type |
 | `world_bloom_event_turn` | `int` | World bloom event turn |
+| `world_bloom_finale_turn` | `int` | Simulated World Bloom finale turn (`2` or `3`) |
 | `world_bloom_character_id` | `int` | World bloom character ID |
 | `challenge_live_character_id` | `int` | Challenge live character ID |
 | `limit` | `int` | Max number of result decks |
@@ -327,8 +328,8 @@ POST /world_bloom/support_cards
 {
   "region": "jp",
   "userdata_hash": "...",
-  "event_id": 123,
-  "world_bloom_character_id": 1,
+  "world_bloom_finale_turn": 3,
+  "forced_leader_character_id": 1,
   "support_master_max": true,
   "support_skill_max": true
 }

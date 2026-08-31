@@ -100,6 +100,7 @@ pub async fn world_bloom_support_cards(
         region = %options.region,
         event_id = options.event_id.unwrap_or_default(),
         world_bloom_event_turn = options.world_bloom_event_turn.unwrap_or_default(),
+        world_bloom_finale_turn = options.world_bloom_finale_turn.unwrap_or_default(),
         world_bloom_character_id = options.world_bloom_character_id.unwrap_or_default(),
         hash_prefix = %userdata_hash.as_deref().map(|hash| truncate_head(hash, 8)).unwrap_or_default(),
         "World bloom support cards request parsed"

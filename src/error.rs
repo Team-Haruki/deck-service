@@ -8,6 +8,8 @@ pub enum AppError {
     Timeout(String),
     BadRequest(String),
     UnsupportedMediaType(String),
+    Upstream(String),
+    ServiceUnavailable(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -17,6 +19,8 @@ impl std::fmt::Display for AppError {
             AppError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             AppError::UnsupportedMediaType(msg) => write!(f, "Unsupported media type: {msg}"),
+            AppError::Upstream(msg) => write!(f, "Upstream error: {msg}"),
+            AppError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {msg}"),
         }
     }
 }
@@ -30,6 +34,8 @@ impl IntoResponse for AppError {
             AppError::UnsupportedMediaType(msg) => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone())
             }
+            AppError::Upstream(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
         };
 
         let body = axum::Json(json!({ "error": message }));

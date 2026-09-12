@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
+use deck_service::registry::{self, RegistryClient, RegistryConfig};
 use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
 
 #[tokio::main]
@@ -57,6 +58,15 @@ async fn main() {
         );
     }
 
+    let registry_cfg = RegistryConfig::from_env();
+    let registry_client = registry_cfg.as_ref().map(|cfg| {
+        Arc::new(RegistryClient::new(cfg).expect("Failed to build the registry client"))
+    });
+    let registry_regions: Vec<String> = registry_cfg
+        .as_ref()
+        .map(|cfg| cfg.regions.clone())
+        .unwrap_or_default();
+
     let engines = EnginePool::new(engine_pool_size).expect("Failed to create DeckRecommend pool");
     let state = Arc::new(AppState {
         engines,
@@ -69,11 +79,26 @@ async fn main() {
             engine_thread_count,
         },
         userdata_cache: UserdataCache::default(),
+        registry: registry_client,
+        masterdata_state: parking_lot::Mutex::new(HashMap::new()),
     });
 
-    preload_masterdata(state.as_ref());
-    preload_musicmetas(state.as_ref());
-    start_masterdata_refresh(Arc::clone(&state));
+    // Regions served by the registry skip the directory path entirely;
+    // anything else keeps today's mounted-directory behaviour.
+    if let Some(cfg) = &registry_cfg {
+        tracing::info!(
+            registry_url = %cfg.url,
+            regions = %cfg.regions.join(","),
+            "Deck-service masterdata source: registry"
+        );
+        registry::preload(&state, cfg).await;
+    }
+    preload_masterdata(state.as_ref(), &registry_regions);
+    preload_musicmetas(state.as_ref(), &registry_regions);
+    start_masterdata_refresh(Arc::clone(&state), &registry_regions);
+    if let Some(cfg) = registry_cfg {
+        registry::spawn_refresh_loop(Arc::clone(&state), cfg);
+    }
 
     tracing::info!(
         lock_warn_ms = lock_warn_threshold.as_millis() as u64,
@@ -100,6 +125,11 @@ async fn main() {
             "/update/masterdata/json",
             post(handlers::update_masterdata_from_json),
         )
+        .route(
+            "/update/masterdata/registry",
+            post(handlers::update_masterdata_from_registry),
+        )
+        .route("/state/masterdata", get(handlers::masterdata_state))
         .route("/update/musicmetas", post(handlers::update_musicmetas))
         .route(
             "/update/musicmetas/string",
@@ -203,18 +233,27 @@ fn effective_engine_thread_count(raw: Option<&str>, available_parallelism: usize
     requested.min(available_parallelism.max(1))
 }
 
-fn preload_masterdata(state: &AppState) {
+fn preload_masterdata(state: &AppState, registry_regions: &[String]) {
     let requested_base_dir = env::var("DECK_MASTERDATA_DIR")
         .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
         .unwrap_or_default();
-    let regions = env_csv("DECK_MASTERDATA_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
+    let regions = directory_regions("DECK_MASTERDATA_REGIONS", registry_regions);
 
     for region in regions {
         update_masterdata_region(state, &requested_base_dir, &region, "preload");
     }
 }
 
-fn start_masterdata_refresh(state: Arc<AppState>) {
+/// Regions the directory path still owns: the configured list minus the
+/// ones the registry serves.
+fn directory_regions(env_name: &str, registry_regions: &[String]) -> Vec<String> {
+    env_csv(env_name, &["jp", "en", "cn", "tw", "kr"])
+        .into_iter()
+        .filter(|region| !registry_regions.contains(region))
+        .collect()
+}
+
+fn start_masterdata_refresh(state: Arc<AppState>, registry_regions: &[String]) {
     let interval = env_duration_ms("DECK_MASTERDATA_REFRESH_MS", 300_000);
     if interval.is_zero() {
         tracing::info!("Deck-service masterdata refresh loop disabled");
@@ -224,7 +263,13 @@ fn start_masterdata_refresh(state: Arc<AppState>) {
     let requested_base_dir = env::var("DECK_MASTERDATA_DIR")
         .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
         .unwrap_or_default();
-    let regions = env_csv("DECK_MASTERDATA_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
+    let regions = directory_regions("DECK_MASTERDATA_REGIONS", registry_regions);
+    if regions.is_empty() {
+        tracing::info!(
+            "Deck-service directory masterdata refresh loop idle: every region comes from the registry"
+        );
+        return;
+    }
     let mut known = HashMap::new();
     for region in &regions {
         if let Ok(Some(signature)) = masterdata_signature(&requested_base_dir, region) {
@@ -379,13 +424,13 @@ fn update_masterdata_region(
     Some(signature)
 }
 
-fn preload_musicmetas(state: &AppState) {
+fn preload_musicmetas(state: &AppState, registry_regions: &[String]) {
     let requested_base_dir = env::var("DECK_MUSICMETAS_DIR")
         .or_else(|_| env::var("DECK_MUSICMETAS_BASE_DIR"))
         .or_else(|_| env::var("DECK_MASTERDATA_DIR"))
         .or_else(|_| env::var("DECK_MASTERDATA_BASE_DIR"))
         .unwrap_or_else(|_| "/app/data".into());
-    let regions = env_csv("DECK_MUSICMETAS_REGIONS", &["jp", "en", "cn", "tw", "kr"]);
+    let regions = directory_regions("DECK_MUSICMETAS_REGIONS", registry_regions);
 
     for region in regions {
         let env_file_name = format!("DECK_MUSICMETAS_FILE_{}", region.to_ascii_uppercase());

@@ -14,10 +14,12 @@ use sonic_rs::{LazyValue, json};
 use crate::error::AppError;
 use crate::masterdata::resolve_masterdata_base_dir;
 use crate::models::{
-    BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions,
-    UpdateMasterdataFromJsonRequest, UpdateMasterdataRequest, UpdateMusicmetasFromStringRequest,
-    UpdateMusicmetasRequest, WorldBloomSupportOptions,
+    BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions, MasterdataStateResponse,
+    UpdateMasterdataFromJsonRequest, UpdateMasterdataFromRegistryRequest,
+    UpdateMasterdataFromRegistryResponse, UpdateMasterdataRequest,
+    UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
+use crate::registry::ensure_region;
 use crate::state::{AppState, EngineLease};
 
 pub async fn health() -> &'static str {
@@ -224,6 +226,61 @@ pub async fn update_masterdata_from_json(
         "Request completed"
     );
     Ok(Json(json!({ "status": "ok" })))
+}
+
+/// Pull the region from the master registry. A caller that already knows the
+/// registry's `contentHash` passes it so an up-to-date region costs no
+/// round trip.
+pub async fn update_masterdata_from_registry(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateMasterdataFromRegistryRequest>,
+) -> Result<Json<UpdateMasterdataFromRegistryResponse>, AppError> {
+    let op_id = state.next_op_id();
+    let request_started = Instant::now();
+    let region = req.region.trim().to_ascii_lowercase();
+    if region.is_empty() {
+        return Err(AppError::BadRequest("region is required".into()));
+    }
+    tracing::info!(
+        op_id,
+        op = "update_masterdata_from_registry",
+        region = %region,
+        content_hash = req.content_hash.as_deref().unwrap_or(""),
+        "Request accepted"
+    );
+    let outcome = ensure_region(&state, &region, req.content_hash.as_deref(), "request").await?;
+    tracing::info!(
+        op_id,
+        op = "update_masterdata_from_registry",
+        region = %region,
+        reloaded = outcome.reloaded,
+        elapsed_ms = elapsed_ms(request_started.elapsed()),
+        "Request completed"
+    );
+    Ok(Json(UpdateMasterdataFromRegistryResponse {
+        status: "ok",
+        region,
+        content_hash: outcome.state.content_hash,
+        git_commit: outcome.state.git_commit,
+        data_version: outcome.state.data_version,
+        reloaded: outcome.reloaded,
+    }))
+}
+
+pub async fn masterdata_state(State(state): State<Arc<AppState>>) -> Json<MasterdataStateResponse> {
+    let regions = state
+        .masterdata_state
+        .lock()
+        .iter()
+        .map(|(region, value)| (region.clone(), value.clone()))
+        .collect();
+    Json(MasterdataStateResponse {
+        registry_url: state
+            .registry
+            .as_ref()
+            .map(|client| client.base_url().to_owned()),
+        regions,
+    })
 }
 
 pub async fn update_musicmetas(

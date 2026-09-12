@@ -6,6 +6,7 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::bridge::DeckRecommend;
+use crate::registry::{RegionMasterState, RegistryClient};
 
 #[derive(Clone, Copy, Debug)]
 pub struct DebugConfig {
@@ -21,6 +22,11 @@ pub struct AppState {
     pub next_op_id: AtomicU64,
     pub debug: DebugConfig,
     pub userdata_cache: UserdataCache,
+    /// `Some` when `DECK_REGISTRY_URL` is set.
+    pub registry: Option<Arc<RegistryClient>>,
+    /// Regions loaded from the registry, keyed by lowercase region.
+    /// Directory-loaded regions are not tracked here.
+    pub masterdata_state: Mutex<HashMap<String, RegionMasterState>>,
 }
 
 impl AppState {

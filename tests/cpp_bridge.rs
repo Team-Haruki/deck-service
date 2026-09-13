@@ -168,7 +168,18 @@ fn changed(mut options: Value, key: &str, value: Value) -> Value {
 
 #[test]
 fn bridge_validates_recommendation_options_and_shared_caches() {
-    DeckRecommend::init_data_path(concat!(env!("CARGO_MANIFEST_DIR"), "/_cpp_src/data")).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cpp_source = std::env::var_os("DECK_CPP_SRC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let bundled = root.join("_cpp_src");
+            if bundled.is_dir() {
+                bundled
+            } else {
+                root.join("../sekai-deck-recommend-cpp")
+            }
+        });
+    DeckRecommend::init_data_path(cpp_source.join("data").to_str().unwrap()).unwrap();
 
     let masterdata = minimal_masterdata();
     let engine = DeckRecommend::new().unwrap();

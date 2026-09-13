@@ -465,3 +465,15 @@ LGPL-2.1 — see [LICENSE](LICENSE).
 - [xfl03/sekai-calculator](https://github.com/xfl03/sekai-calculator) — original algorithms and implementation
 - [NeuraXmy/sekai-deck-recommend-cpp](https://github.com/NeuraXmy/sekai-deck-recommend-cpp) — C++ engine original implementation
 - [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) — current C++ engine maintenance, Python package, and WebAssembly/npm target
+
+## User data cache limits
+
+The Rust replay cache uses LRU eviction, a byte budget and an idle TTL. Defaults:
+
+- `DECK_USERDATA_CACHE_MAX_BYTES=268435456` (256 MiB, including estimated entry metadata).
+- `DECK_USERDATA_CACHE_MAX_ENTRIES=128`.
+- `DECK_USERDATA_CACHE_TTL_SECONDS=1800` (30 minutes since the last cache access).
+
+Idle entries are removed on access and by a 60-second sweep. Each payload is limited to 32 MiB; compressed protocol decoding is limited to 64 MiB. Cache eviction leaves in-flight `Arc` references valid, so these limits describe retained cache data, not total process RSS. Each engine tracks at most 64 loaded hashes, matching the C++ cache capacity.
+
+`GET /cache/stats` reports counts, estimated bytes, limits and evictions, without payloads or user hashes. An expired or evicted hash returns `User data not found for userdata_hash`; clients must upload the snapshot again before retrying. Haruki Cloud handles this automatically.

@@ -68,9 +68,25 @@ async fn main() {
             default_recommend_timeout_ms,
             engine_thread_count,
         },
-        userdata_cache: UserdataCache::default(),
+        userdata_cache: UserdataCache::new(
+            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX_BYTES")
+                .unwrap_or(deck_service::userdata_cache::DEFAULT_MAX_BYTES),
+            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX_ENTRIES")
+                .unwrap_or(deck_service::userdata_cache::DEFAULT_MAX_ENTRIES),
+            Duration::from_secs(
+                env_usize_at_least_one("DECK_USERDATA_CACHE_TTL_SECONDS").unwrap_or(1800) as u64,
+            ),
+        ),
     });
 
+    let cache_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            timer.tick().await;
+            cache_state.userdata_cache.expire();
+        }
+    });
     preload_masterdata(state.as_ref());
     preload_musicmetas(state.as_ref());
     start_masterdata_refresh(Arc::clone(&state));
@@ -88,6 +104,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/cache/stats", get(handlers::userdata_cache_stats))
         .route("/cache_userdata", post(handlers::cache_userdata))
         .route("/recommend", post(handlers::recommend))
         .route("/calculate", post(handlers::calculate))

@@ -56,6 +56,10 @@ pub async fn cache_userdata(
         "Userdata payload parsed"
     );
 
+    state
+        .userdata_cache
+        .validate_payload(&userdata)
+        .map_err(AppError::BadRequest)?;
     let userdata_hash = tokio::task::block_in_place(|| {
         run_engine_op(state.as_ref(), op_id, "cache_userdata", |engine| {
             let userdata_hash = engine.cache_userdata(&userdata)?;
@@ -63,7 +67,10 @@ pub async fn cache_userdata(
             Ok(userdata_hash)
         })
     })?;
-    state.userdata_cache.remember(&userdata_hash, &userdata);
+    state
+        .userdata_cache
+        .remember(&userdata_hash, &userdata)
+        .map_err(AppError::BadRequest)?;
 
     tracing::info!(
         op_id,
@@ -861,13 +868,19 @@ fn parse_single_decompressed_json_segment(body: &[u8], name: &str) -> Result<Vec
 }
 
 fn extract_decompressed_segments(body: &[u8]) -> Result<Vec<Vec<u8>>, AppError> {
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(body))
+    let decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(body))
         .map_err(|e| AppError::BadRequest(format!("failed to decode zstd payload: {e}")))?;
     let mut payload = Vec::new();
     decoder
+        .take((crate::userdata_cache::MAX_PAYLOAD_BYTES as u64 * 2) + 1)
         .read_to_end(&mut payload)
         .map_err(|e| AppError::BadRequest(format!("failed to decode zstd payload: {e}")))?;
 
+    if payload.len() > crate::userdata_cache::MAX_PAYLOAD_BYTES * 2 {
+        return Err(AppError::BadRequest(
+            "decompressed payload exceeds byte limit".into(),
+        ));
+    }
     let mut segments = Vec::new();
     let mut index = 0usize;
     while index < payload.len() {
@@ -922,7 +935,7 @@ fn resolve_userdata_payload(
     match state.userdata_cache.get(&userdata_hash) {
         Some(payload) => Ok(Some(payload)),
         None => Err(AppError::BadRequest(format!(
-            "unknown userdata_hash: {userdata_hash}; call /cache_userdata first"
+            "User data not found for userdata_hash: {userdata_hash}; call /cache_userdata first"
         ))),
     }
 }
@@ -1140,6 +1153,12 @@ fn elapsed_ms(duration: std::time::Duration) -> f64 {
 
 fn truncate_head(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
+}
+
+pub async fn userdata_cache_stats(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::userdata_cache::CacheStats> {
+    Json(state.userdata_cache.stats())
 }
 
 #[cfg(test)]

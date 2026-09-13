@@ -1,5 +1,4 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -37,7 +36,7 @@ pub struct EnginePool {
 
 struct EngineSlot {
     engine: DeckRecommend,
-    userdata_hashes: HashSet<String>,
+    userdata_hashes: VecDeque<String>,
 }
 
 struct EnginePoolState {
@@ -47,30 +46,7 @@ struct EnginePoolState {
     pending_writers: usize,
 }
 
-#[derive(Default)]
-pub struct UserdataCache {
-    entries: Mutex<HashMap<String, Arc<str>>>,
-}
-
-impl UserdataCache {
-    pub fn remember(&self, hash: &str, userdata: &str) {
-        let hash = hash.trim();
-        if hash.is_empty() {
-            return;
-        }
-        self.entries
-            .lock()
-            .insert(hash.to_string(), Arc::<str>::from(userdata.to_string()));
-    }
-
-    pub fn get(&self, hash: &str) -> Option<Arc<str>> {
-        self.entries.lock().get(hash.trim()).cloned()
-    }
-
-    pub fn clear(&self) {
-        self.entries.lock().clear();
-    }
-}
+pub use crate::userdata_cache::UserdataCache;
 
 #[derive(Clone, Copy, Debug)]
 pub enum EnginePoolError {
@@ -106,7 +82,7 @@ impl EnginePool {
         for _ in 0..size {
             available.push(EngineSlot {
                 engine: DeckRecommend::new()?,
-                userdata_hashes: HashSet::new(),
+                userdata_hashes: VecDeque::new(),
             });
         }
 
@@ -198,7 +174,8 @@ impl EngineLease<'_> {
                 .as_ref()
                 .expect("engine lease accessed after release")
                 .userdata_hashes
-                .contains(hash)
+                .iter()
+                .any(|value| value == hash)
     }
 
     pub fn remember_userdata_hash(&mut self, hash: &str) {
@@ -206,11 +183,17 @@ impl EngineLease<'_> {
         if hash.is_empty() {
             return;
         }
-        self.slot
+        let hashes = &mut self
+            .slot
             .as_mut()
             .expect("engine lease accessed after release")
-            .userdata_hashes
-            .insert(hash.to_string());
+            .userdata_hashes;
+        if !hashes.iter().any(|value| value == hash) {
+            if hashes.len() >= 64 {
+                hashes.pop_front();
+            }
+            hashes.push_back(hash.to_owned());
+        }
     }
 
     pub fn forget_userdata_hash(&mut self, hash: &str) {
@@ -222,7 +205,7 @@ impl EngineLease<'_> {
             .as_mut()
             .expect("engine lease accessed after release")
             .userdata_hashes
-            .remove(hash);
+            .retain(|value| value != hash);
     }
 }
 
@@ -267,5 +250,28 @@ impl Drop for ExclusiveEngineLease<'_> {
     fn drop(&mut self) {
         self.state.writer_active = false;
         self.pool.condvar.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_hash_tracking_is_bounded_and_can_be_replayed() {
+        let pool = EnginePool::new(1).unwrap();
+        let mut engine = pool.checkout(Duration::from_secs(1)).unwrap();
+        for i in 0..100 {
+            engine.remember_userdata_hash(&i.to_string());
+        }
+        assert_eq!(engine.slot.as_ref().unwrap().userdata_hashes.len(), 64);
+        assert!(!engine.has_userdata_hash("0"));
+        assert!(engine.has_userdata_hash("99"));
+        engine.remember_userdata_hash("99");
+        assert_eq!(engine.slot.as_ref().unwrap().userdata_hashes.len(), 64);
+        engine.forget_userdata_hash("99");
+        assert!(!engine.has_userdata_hash("99"));
+        engine.remember_userdata_hash("0");
+        assert!(engine.has_userdata_hash("0"));
     }
 }

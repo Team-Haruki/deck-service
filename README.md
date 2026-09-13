@@ -139,7 +139,7 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `46c3d60d7b712bcf382af9acfa71180571b95490`;
+`master` at commit `7b197b0750fb6fa6bbabb39fee65df162f4126cd`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 

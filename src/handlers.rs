@@ -5,7 +5,10 @@ use std::time::Instant;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, header::CONTENT_TYPE};
+use axum::http::{
+    HeaderMap, HeaderValue,
+    header::{CONTENT_TYPE, LINK},
+};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -22,6 +25,24 @@ use crate::models::{
 };
 use crate::registry::ensure_region;
 use crate::state::{AppState, EngineLease, UserdataInvalidation, invalidate_userdata};
+
+/// Successor of the deprecated directory endpoint `POST /update/masterdata`.
+const MASTERDATA_REGISTRY_ENDPOINT: &str = "/update/masterdata/registry";
+const DEPRECATION_HEADER: &str = "deprecation";
+
+/// JSON response for a deprecated endpoint: same status and body shape, plus
+/// `Deprecation: true` and `Link: <successor>; rel="successor-version"`.
+fn deprecated_response(body: sonic_rs::Value, successor: &'static str) -> Response {
+    let mut response = Json(body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(DEPRECATION_HEADER, HeaderValue::from_static("true"));
+    headers.insert(
+        LINK,
+        HeaderValue::from_str(&format!("<{successor}>; rel=\"successor-version\""))
+            .expect("static successor path is a valid header value"),
+    );
+    response
+}
 
 pub async fn health() -> &'static str {
     "ok"
@@ -173,8 +194,14 @@ pub async fn recommend(
 pub async fn update_masterdata(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMasterdataRequest>,
-) -> Result<Json<sonic_rs::Value>, AppError> {
+) -> Result<Response, AppError> {
     let op_id = state.next_op_id();
+    tracing::warn!(
+        op_id,
+        op = "update_masterdata",
+        region = %req.region,
+        "Deprecated endpoint POST /update/masterdata (base_dir) called; use POST /update/masterdata/registry — removed in the release after the registry fetcher ships"
+    );
     let request_started = Instant::now();
     let resolved_base_dir = resolve_masterdata_base_dir(&req.base_dir, &req.region);
     tracing::info!(
@@ -209,7 +236,14 @@ pub async fn update_masterdata(
         elapsed_ms = elapsed_ms(request_started.elapsed()),
         "Request completed"
     );
-    Ok(Json(json!({ "status": "ok" })))
+    Ok(deprecated_response(
+        json!({
+            "status": "ok",
+            "deprecated": true,
+            "replacement": MASTERDATA_REGISTRY_ENDPOINT,
+        }),
+        MASTERDATA_REGISTRY_ENDPOINT,
+    ))
 }
 
 pub async fn update_masterdata_from_json(
@@ -1250,7 +1284,48 @@ fn truncate_head(value: &str, count: usize) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{batch_recommend_response_json, merge_native_batch_results};
+    use axum::http::StatusCode;
+    use sonic_rs::json;
+
+    use super::{
+        MASTERDATA_REGISTRY_ENDPOINT, batch_recommend_response_json, deprecated_response,
+        merge_native_batch_results,
+    };
+
+    #[tokio::test]
+    async fn deprecated_response_marks_headers_and_body() {
+        let response = deprecated_response(
+            json!({
+                "status": "ok",
+                "deprecated": true,
+                "replacement": MASTERDATA_REGISTRY_ENDPOINT,
+            }),
+            MASTERDATA_REGISTRY_ENDPOINT,
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("deprecation")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("link")
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"</update/masterdata/registry>; rel="successor-version""#)
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("response body should be readable");
+        let body = std::str::from_utf8(&body).expect("response body should be UTF-8");
+        assert!(body.contains(r#""deprecated":true"#));
+        assert!(body.contains(r#""status":"ok""#));
+        assert!(body.contains(r#""replacement":"/update/masterdata/registry""#));
+    }
 
     #[test]
     fn native_batch_results_preserve_item_success_and_error() {

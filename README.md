@@ -90,10 +90,10 @@ export DECK_RL_SEED_CACHE_FILE=/path/to/cache/rl_seed_cache.tsv
 # Plain http on the private network; replaces the mounted masterdata volume.
 export DECK_REGISTRY_URL=http://100.76.159.97:9998
 
-# Legacy: preload region masterdata from a mounted directory at startup
+# Legacy/deprecated: preload region masterdata from a mounted directory at startup
 export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
 
-# Optional: poll mounted masterdata for changes (ms, default: 300000; 0 disables)
+# Optional (legacy directory path): poll mounted masterdata for changes (ms, default: 300000; 0 disables)
 export DECK_MASTERDATA_REFRESH_MS=300000
 
 # Optional: preload music metas at startup
@@ -126,7 +126,9 @@ export DECK_RECOMMEND_TIMEOUT_MS=15000
 Masterdata, music metas, and userdata are application/runtime inputs. They are
 not bundled by the upstream WebAssembly npm package, and deck-service follows
 the same model: static engine data comes from `_cpp_src/data`, while region data
-is loaded by startup env vars or update endpoints.
+is loaded by startup env vars or update endpoints. Prefer `DECK_REGISTRY_URL`;
+the masterdata directory path (`DECK_MASTERDATA_BASE_DIR` and
+`POST /update/masterdata`) is legacy and deprecated.
 
 ## Upstream Packages
 
@@ -370,7 +372,7 @@ Response: JSON array of support cards sorted by support bonus descending:
 ]
 ```
 
-### Update Masterdata (from directory)
+### Update Masterdata (registry / legacy directory)
 
 ```
 POST /update/masterdata/registry
@@ -398,9 +400,14 @@ the structured one. Missing World Link finale tables
 (`worldBloomSupportDeckUnitEventLimitedBonuses` and friends) make finale
 requests fail per request rather than compute a zero bonus.
 
-POST /update/masterdata   (legacy directory path, kept for one release)
+POST /update/masterdata   (Deprecated: legacy directory path)
 { "base_dir": "/path/to/masterdata", "region": "jp" }
-→ { "status": "ok" }
+→ { "status": "ok", "deprecated": true, "replacement": "/update/masterdata/registry" }
+Deprecated; use `POST /update/masterdata/registry`. Removed in the release after
+the registry fetcher (deck-service #19) ships. Status codes and error bodies are
+unchanged; a successful response carries `Deprecation: true` and
+`Link: </update/masterdata/registry>; rel="successor-version"`, and each call
+logs a warning.
 ```
 
 ### Update Masterdata (from JSON)
@@ -448,8 +455,9 @@ POST /update/musicmetas/string
 | `DECK_REGISTRY_REFRESH_MS` | `300000` | Poll interval for the registry manifest (`0` disables; a reload happens only when `contentHash` changes, music metas use `If-None-Match`) |
 | `DECK_REGISTRY_FETCH_CONCURRENCY` | `8` | Parallel blob downloads per region load |
 | `DECK_REGISTRY_TIMEOUT_MS` | `30000` | Per-request timeout against the registry |
-| `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Base directory used to preload region masterdata on startup |
-| `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload masterdata for |
+| `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Legacy (deprecated directory path): base directory used to preload region masterdata on startup |
+| `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | Legacy (deprecated directory path): CSV list of regions to preload masterdata for |
+| `DECK_MASTERDATA_REFRESH_MS` | `300000` | Legacy (deprecated directory path): poll interval for mounted masterdata changes (`0` disables) |
 | `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` | masterdata base, then `/app/data` | Base directory used to preload region music metas on startup |
 | `DECK_MUSICMETAS_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload music metas for |
 | `DECK_MUSICMETAS_FILE_<REGION>` | unset | Explicit music metas file path for one region, e.g. `DECK_MUSICMETAS_FILE_JP` |
@@ -483,25 +491,6 @@ This enables per-request `op_id` logs around:
 - per-item progress inside batch recommend
 - per-item lock wait / engine execution time inside batch recommend
 
-## Cloud Guide
-
-For production/cloud integration, see [docs/cloud-call-guide.md](docs/cloud-call-guide.md).
-
-## Local Hybrid Benchmark
-
-When `_cpp_src/` and region masterdata are available locally, you can run the built-in hybrid benchmark:
-
-```bash
-cargo run --release --bin hybrid_bench
-```
-
-The benchmark uses local snapshot JSONs under `../metadata/`, loads `music_metas` from `/tmp/music_metas_{region}.json`, and compares:
-
-- `dfs` — exact search with timeout bound
-- `ga` — pure genetic search
-- `dfs_ga` — DFS warmup to seed GA
-- `rl` — learned policy + remembered seeds + seeded GA refine
-
 ## Project Structure
 
 ```
@@ -513,6 +502,9 @@ deck-service/
 │   ├── bridge.rs        # Safe Rust wrapper around C FFI
 │   ├── ffi.rs           # Raw unsafe extern "C" bindings
 │   ├── state.rs         # Shared application state (Mutex<Engine>)
+│   ├── registry.rs      # Master registry client (manifest, blobs, music metas)
+│   ├── masterdata.rs    # Legacy masterdata directory resolution (deprecated path)
+│   ├── masterdata_audit.rs # Master data key checks (required, key tables, optional)
 │   └── error.rs         # AppError → HTTP response mapping
 ├── cpp_bridge/
 │   ├── deck_recommend_c.h    # C API header

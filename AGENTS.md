@@ -37,7 +37,8 @@ All Rust source files are directly in `src/` — no nested modules:
 | `bridge.rs` | Safe wrapper around FFI (owns the C++ handle, implements `Drop`) |
 | `ffi.rs` | Raw `unsafe extern "C"` declarations + helper functions |
 | `state.rs` | `AppState`, `EnginePool` (reader/writer concurrency), `UserdataCache` |
-| `masterdata.rs` | Masterdata directory resolution with region-aware candidate search |
+| `masterdata.rs` | Legacy masterdata directory resolution with region-aware candidate search (the directory path and `POST /update/masterdata` are deprecated) |
+| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the 37-key lock tests |
 | `registry.rs` | Master registry client: frozen 37-key engine list, manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
 | `error.rs` | `AppError` enum with `IntoResponse` impl |
 

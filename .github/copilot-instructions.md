@@ -40,7 +40,7 @@ FFI boundary uses JSON strings. `DeckRecommend` handle is `Send` (not `Sync`), c
 - `models.rs` — request/response types (mirrors upstream Python API)
 - `state.rs` — `AppState`, `EnginePool`, `UserdataCache`
 - `masterdata.rs` — region-aware masterdata directory resolution
-- `cpp_bridge/deck_recommend_c.cpp` — C bridge using nlohmann/json
+- `cpp_bridge/deck_recommend_c.cpp` — C bridge using yyjson
 - `build.zig` — compiles C++ sources and C bridge into the static archive for Zig-backed targets
 - `build.rs` — Cargo glue for path resolution and link metadata
 

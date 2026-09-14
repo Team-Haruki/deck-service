@@ -13,6 +13,7 @@ use sonic_rs::{LazyValue, json};
 
 use crate::error::AppError;
 use crate::masterdata::resolve_masterdata_base_dir;
+use crate::masterdata_audit::audit_masterdata;
 use crate::models::{
     BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions, MasterdataStateResponse,
     UpdateMasterdataFromJsonRequest, UpdateMasterdataFromRegistryRequest,
@@ -210,6 +211,21 @@ pub async fn update_masterdata_from_json(
         file_count = req.data.len(),
         "Request accepted"
     );
+    // C9: reject a caller-supplied body the engine could never recommend from
+    // with a 400 (not a 500), so retrying callers do not re-send it.
+    let audit = audit_masterdata(&req.data);
+    if !audit.missing_required_keys.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "masterdata lacks required keys: {}",
+            audit.missing_required_keys.join(",")
+        )));
+    }
+    if !audit.empty_key_tables.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "masterdata key tables are empty: {}",
+            audit.empty_key_tables.join(",")
+        )));
+    }
     tokio::task::block_in_place(|| {
         run_engine_exclusive_op(
             state.as_ref(),

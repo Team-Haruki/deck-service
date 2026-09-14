@@ -356,6 +356,11 @@ Pulls the region's current manifest from `DECK_REGISTRY_URL`; a matching
 `content_hash` short-circuits without a round trip, an unchanged manifest only
 re-checks music metas (conditional GET), a changed `contentHash` reloads.
 502 when the registry cannot be reached, 503 when `DECK_REGISTRY_URL` is unset.
+502 `registry master data has empty key tables: <names>` when any key table
+(`areaItemLevels`, `areaItems`, `areas`, `cardEpisodes`, `cards`, `cardRarities`,
+`characterRanks`, `gameCharacters`, `gameCharacterUnits`, `honors`,
+`masterLessons`, `musicDifficulties`, `musics`, `musicVocals`, `skills`) is not
+a non-empty JSON array; the region keeps its previously loaded data.
 
 GET /state/masterdata
 → { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest" } } }
@@ -373,7 +378,15 @@ POST /update/masterdata   (legacy directory path, kept for one release)
 POST /update/masterdata/json
 { "data": { "cards.json": "...", "skills.json": "..." }, "region": "jp" }
 → { "status": "ok" }
+400 `masterdata lacks required keys: <names>` when a required key is absent.
+400 `masterdata key tables are empty: <names>` when a key table (same list as
+the registry path) is not a non-empty JSON array. Keys are normalised like the
+engine does (`master/cards.json` → `cards`) before the check; the engine is
+not touched on either 400.
 ```
+
+The directory path (`POST /update/masterdata`) is not audited: its files are
+read inside the engine.
 
 ### Update Music Metas (from file)
 

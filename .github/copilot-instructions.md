@@ -18,7 +18,7 @@ Upstream now ships Python bindings and a WebAssembly/npm package target. deck-se
 - C++ source resolved from: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - Clone source with submodules, e.g. `git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src`
 - Cross-compile: `cargo zigbuild --target x86_64-unknown-linux-musl`
-- Docker: multi-stage build → `scratch` image (static musl binary)
+- Docker: multi-stage build → `scratch` image (static musl binary); `/data` read-only static data, `/cache` (uid 65532) holds the RL seed cache via `DECK_RL_SEED_CACHE_FILE`
 
 ## Architecture
 

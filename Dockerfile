@@ -47,13 +47,18 @@ RUN cargo zigbuild --release --target x86_64-unknown-linux-musl && \
 # Copy static data needed at runtime
 RUN cp -r _cpp_src/data /data
 
+# Writable RL seed cache for the non-root runtime user (/data stays read-only static data)
+RUN mkdir -p /cache && chown 65532:65532 /cache
+
 # --- Final minimal image ---
 FROM scratch
 
 COPY --from=builder /deck-service /deck-service
 COPY --from=builder /data /data
+COPY --from=builder --chown=65532:65532 /cache /cache
 
 ENV DECK_DATA_DIR=/data
+ENV DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv
 ENV BIND_ADDR=0.0.0.0:3000
 
 USER 65532:65532

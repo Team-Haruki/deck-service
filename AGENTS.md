@@ -95,6 +95,9 @@ Batch `/recommend` picks its execution strategy from `DECK_ENGINE_THREADS`:
 - Uses multi-stage build: zig+rust builder → `scratch` final image
 - Output is a static musl binary with zero runtime dependencies
 - No TLS/certificate libraries needed (service is behind a reverse proxy)
+- `/data` is read-only static engine data; `/cache` is owned by uid 65532 and holds the RL seed cache (`ENV DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv`). No `VOLUME` instruction; deployments mount a named volume or a `chown 65532:65532` host dir at `/cache`
+- `Dockerfile.runtime` uses a small alpine prep stage to create `/cache`, since `scratch` has no shell
+- The startup log line `RL seed cache enabled` / not-writable warning / `disabled` is the deploy-time check
 
 ## Adding New Endpoints
 

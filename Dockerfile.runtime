@@ -1,9 +1,15 @@
+FROM alpine:3.22 AS prep
+RUN mkdir -p /cache && chown 65532:65532 /cache
+
 FROM scratch
 
 COPY deck-service /deck-service
+# `data/` must be the engine's static data (`_cpp_src/data`); release tars do not contain it.
 COPY data /data
+COPY --from=prep --chown=65532:65532 /cache /cache
 
 ENV DECK_DATA_DIR=/data
+ENV DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv
 ENV BIND_ADDR=0.0.0.0:3000
 
 USER 65532:65532

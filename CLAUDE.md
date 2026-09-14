@@ -50,7 +50,8 @@ Userdata is cached server-side: clients call `/cache_userdata` first, then refer
 
 ## Key Environment Variables
 
-- `DECK_DATA_DIR` -- path to C++ engine static data (required at runtime)
+- `DECK_DATA_DIR` -- path to C++ engine static data (required at runtime; read-only)
+- `DECK_RL_SEED_CACHE_FILE` / `DECK_RL_SEED_CACHE_DISABLE` -- engine RL seed cache file (unset -> `$DECK_DATA_DIR/rl_seed_cache.tsv`; image sets `/cache/rl_seed_cache.tsv`) and literal `1` kill switch; `main.rs` probes writability at startup and logs enabled/disabled/not-writable
 - `DECK_REGISTRY_URL` -- master registry base URL; when set, `DECK_REGISTRY_REGIONS` (default all five) are pulled from the registry (`registry.rs`: manifest → 37 engine keys by blob digest → `update_masterdata_from_json`, plus music metas) and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` / `_FETCH_CONCURRENCY` / `_TIMEOUT_MS` tune it. `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
 - `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` -- masterdata directory for preloading on startup
 - `DECK_MASTERDATA_REGIONS` -- CSV of regions to preload (default: jp,en,cn,tw,kr)

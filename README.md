@@ -79,7 +79,12 @@ Output: `target/x86_64-unknown-linux-musl/release/deck-service` (~4 MB, statical
 ```bash
 # Required: path to the C++ engine's static data directory.
 # This is the upstream static data/, not runtime masterdata/music metas.
+# Treated as read-only static data; the RL seed cache goes to DECK_RL_SEED_CACHE_FILE.
 export DECK_DATA_DIR=/path/to/_cpp_src/data
+
+# Optional: writable RL seed cache file (unset -> $DECK_DATA_DIR/rl_seed_cache.tsv;
+# DECK_RL_SEED_CACHE_DISABLE=1 turns persistence off)
+export DECK_RL_SEED_CACHE_FILE=/path/to/cache/rl_seed_cache.tsv
 
 # Preferred: pull master data (and music metas) from the Haruki master registry.
 # Plain http on the private network; replaces the mounted masterdata volume.
@@ -138,8 +143,20 @@ engine sources directly through `cpp_bridge/`.
 
 ```bash
 docker build -t deck-service .
-docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-service
+docker run -p 3000:3000 -v deck-rl-cache:/cache deck-service
 ```
+
+The container has three different mounts, each with its own role:
+
+- `/data` is the engine's static data, baked into the image and read-only
+  (`DECK_DATA_DIR=/data`).
+- `/cache` holds the RL seed cache (`DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv`)
+  and must be writable by uid 65532: use a named volume (seeded with the right
+  ownership from the image) or a host directory after `chown 65532:65532`. With a
+  read-only root filesystem, mount a named volume or tmpfs there. At startup the
+  service logs `RL seed cache enabled`, a not-writable warning, or `disabled`.
+- Master data comes from `DECK_REGISTRY_URL`, or from a legacy masterdata
+  directory mounted wherever `DECK_MASTERDATA_BASE_DIR` points.
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
@@ -424,6 +441,8 @@ POST /update/musicmetas/string
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
+| `DECK_RL_SEED_CACHE_FILE` | image: `/cache/rl_seed_cache.tsv`; binary: unset (→ `$DECK_DATA_DIR/rl_seed_cache.tsv`) | RL seed cache file read by the engine; its directory must be writable. Checked and logged at startup |
+| `DECK_RL_SEED_CACHE_DISABLE` | unset | Set to the literal `1` to disable RL seed cache persistence |
 | `DECK_REGISTRY_URL` | unset | Master registry base URL (plain http). When set, the regions in `DECK_REGISTRY_REGIONS` are loaded from `GET /v1/master/{region}/current` + `blob/{sha256}` and `GET /v1/metas/{region}/music_metas.json` instead of the directory variables below, which then only apply to regions not listed there |
 | `DECK_REGISTRY_REGIONS` | `jp,en,cn,tw,kr` | CSV of regions served by the registry |
 | `DECK_REGISTRY_REFRESH_MS` | `300000` | Poll interval for the registry manifest (`0` disables; a reload happens only when `contentHash` changes, music metas use `If-None-Match`) |

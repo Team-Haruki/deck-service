@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::error::AppError;
 use crate::masterdata_audit::audit_masterdata;
-use crate::state::AppState;
+use crate::state::{AppState, UserdataInvalidation, invalidate_userdata};
 
 /// Keys the C++ engine reads (`sekai-deck-recommend-cpp`
 /// `src/data-provider/master-data.cpp`). A missing required key aborts the
@@ -568,7 +568,8 @@ async fn refresh_music_metas(
 
 /// Same shape as the handlers' exclusive path: master data lives in the
 /// engine's shared region store, so one engine applies it for the pool;
-/// cached userdata is then invalid for every slot.
+/// cached userdata tagged with this region (or never used) is then dropped
+/// from the cache and every slot.
 fn apply_exclusive<F>(state: &AppState, region: &str, f: F) -> Result<(), RegistryError>
 where
     F: FnOnce(&crate::bridge::DeckRecommend) -> Result<(), String>,
@@ -582,9 +583,16 @@ where
         .next()
         .ok_or_else(|| RegistryError::Engine("engine pool is empty".into()))?;
     f(engine).map_err(RegistryError::Engine)?;
-    engines.clear_userdata_hashes();
-    state.userdata_cache.clear();
-    tracing::debug!(region = %region, "Cleared cached userdata after registry update");
+    let evicted = invalidate_userdata(
+        &state.userdata_cache,
+        &mut engines,
+        UserdataInvalidation::Region(region),
+    );
+    tracing::debug!(
+        region = %region,
+        evicted_userdata = evicted,
+        "Invalidated cached userdata after registry update"
+    );
     Ok(())
 }
 
@@ -956,6 +964,18 @@ mod tests {
         );
         assert_eq!(counts(&registry), (3, 37, 3));
 
+        // E7: seed userdata tagged cn, tagged jp, and never used.
+        state.userdata_cache.remember("h-cn", "{}");
+        assert!(state.userdata_cache.get("h-cn", Some("cn")).is_some());
+        state.userdata_cache.remember("h-jp", "{}");
+        assert!(state.userdata_cache.get("h-jp", Some("jp")).is_some());
+        state.userdata_cache.remember("h-none", "{}");
+        {
+            let mut lease = state.engines.checkout(Duration::from_secs(1)).unwrap();
+            lease.remember_userdata_hash("h-cn");
+            lease.remember_userdata_hash("h-jp");
+        }
+
         // New manifest without an optional key: reload, 36 blobs.
         let mut keys = all_keys();
         keys.retain(|key| *key != "ingameNotes");
@@ -965,6 +985,18 @@ mod tests {
         assert_eq!(outcome.state.content_hash, hash_v2);
         assert_eq!(counts(&registry), (4, 37 + 36, 4));
         assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
+
+        // E7: the jp reload evicts jp-tagged and untagged userdata, keeps cn,
+        // and prunes only the evicted hashes from the engine slot.
+        assert!(state.userdata_cache.get("h-cn", None).is_some());
+        assert!(state.userdata_cache.get("h-jp", None).is_none());
+        assert!(state.userdata_cache.get("h-none", None).is_none());
+        {
+            // Pool size 1: the same slot comes back.
+            let lease = state.engines.checkout(Duration::from_secs(1)).unwrap();
+            assert!(lease.has_userdata_hash("h-cn"));
+            assert!(!lease.has_userdata_hash("h-jp"));
+        }
         let text = sonic_rs::to_string(&outcome.state).unwrap();
         assert!(
             text.contains("\"missingOptionalKeys\":[\"ingameNotes\"]"),

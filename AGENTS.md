@@ -59,6 +59,8 @@ All Rust source files are directly in `src/` — no nested modules:
 
 Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand.
 
+`UserdataCache` is an LRU capped by `DECK_USERDATA_CACHE_MAX` (default 64, the same cap as the C++ `SharedUserdataStore`). `/cache_userdata` carries no region, so entries are tagged on use (`get(hash, Some(region))` from recommend, batch recommend and world bloom support cards). Every exclusive update (masterdata/musicmetas handlers, the directory refresh watcher, the registry path) must call `invalidate_userdata(..., UserdataInvalidation::Region(region))` rather than clearing the cache directly: it evicts entries tagged with that region plus untagged entries and prunes exactly those hashes from every engine slot. LRU eviction inside `remember` does not prune slot hash sets (no exclusive lease is held); a stale slot hash is harmless because the request fails at `resolve_userdata_payload` first. Lock order is pool, then cache; never take the cache lock and then the pool.
+
 `DECK_ENGINE_THREADS` (default 1, clamped to available parallelism) sets the C++ engine's internal thread count. Keep `pool size × engine threads` within the CPU count; startup logs a warning when oversubscribed.
 
 ## Batch Recommendation (adaptive)

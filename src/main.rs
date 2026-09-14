@@ -15,7 +15,10 @@ use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::registry::{self, RegistryClient, RegistryConfig};
-use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
+use deck_service::state::{
+    AppState, DEFAULT_USERDATA_CACHE_MAX, DebugConfig, EnginePool, UserdataCache,
+    UserdataInvalidation, invalidate_userdata,
+};
 
 #[tokio::main]
 async fn main() {
@@ -78,7 +81,9 @@ async fn main() {
             default_recommend_timeout_ms,
             engine_thread_count,
         },
-        userdata_cache: UserdataCache::default(),
+        userdata_cache: UserdataCache::new(
+            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX").unwrap_or(DEFAULT_USERDATA_CACHE_MAX),
+        ),
         registry: registry_client,
         masterdata_state: parking_lot::Mutex::new(HashMap::new()),
     });
@@ -108,6 +113,7 @@ async fn main() {
         engine_thread_count,
         available_parallelism,
         default_recommend_timeout_ms = default_recommend_timeout_ms.unwrap_or_default(),
+        userdata_cache_max = state.userdata_cache.capacity(),
         "Initialized deck-service debug thresholds"
     );
 
@@ -201,7 +207,7 @@ fn env_usize_at_least_one(name: &str) -> Option<usize> {
                 tracing::warn!(
                     env_var = name,
                     value = %raw,
-                    "Ignoring non-positive engine pool size"
+                    "Ignoring non-positive value"
                 );
                 None
             }
@@ -210,7 +216,7 @@ fn env_usize_at_least_one(name: &str) -> Option<usize> {
                     env_var = name,
                     value = %raw,
                     error = %err,
-                    "Ignoring invalid engine pool size"
+                    "Ignoring invalid value"
                 );
                 None
             }
@@ -411,12 +417,16 @@ fn update_masterdata_region(
         return None;
     }
 
-    engines.clear_userdata_hashes();
-    state.userdata_cache.clear();
+    let evicted = invalidate_userdata(
+        &state.userdata_cache,
+        &mut engines,
+        UserdataInvalidation::Region(region),
+    );
     tracing::info!(
         region = %region,
         resolved_base_dir = %signature.base_dir,
         engine_count = engines.len(),
+        evicted_userdata = evicted,
         file_count = signature.file_count,
         reason,
         "Updated deck-service masterdata"

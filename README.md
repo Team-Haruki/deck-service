@@ -278,6 +278,13 @@ Response:
 Use the returned `userdata_hash` in later `/recommend` requests to avoid
 resending large userdata payloads.
 
+The server keeps at most `DECK_USERDATA_CACHE_MAX` payloads (least recently
+used first out). A hash is tagged with a region the first time a request uses
+it; a master data or music metas update for one region drops the hashes tagged
+with that region and the hashes no request has used yet. Hashes used only with
+other regions stay cached. A dropped hash makes the next request fail with
+`400 unknown userdata_hash`; call `/cache_userdata` again.
+
 ### Batch Recommend
 
 ```
@@ -433,6 +440,7 @@ POST /update/musicmetas/string
 | `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring an engine pool slot |
 | `DECK_ENGINE_WARN_MS` | `10000` | Warn threshold for a single FFI/engine operation |
 | `DECK_ENGINE_POOL_SIZE` | `min(cpu_count, 4)` | Number of engine instances used for concurrent recommends |
+| `DECK_USERDATA_CACHE_MAX` | `64` | Maximum cached userdata payloads (LRU); values below 1 or invalid fall back to the default with a warning |
 | `DECK_ENGINE_THREADS` | `1` | C++ engine-internal parallelism; keep `pool size × engine threads` within the available CPU count |
 | `DECK_RECOMMEND_TIMEOUT_MS` | unset | Default `timeout_ms` injected into recommend requests when missing |
 

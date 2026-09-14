@@ -21,7 +21,7 @@ use crate::models::{
     UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
 use crate::registry::ensure_region;
-use crate::state::{AppState, EngineLease};
+use crate::state::{AppState, EngineLease, UserdataInvalidation, invalidate_userdata};
 
 pub async fn health() -> &'static str {
     "ok"
@@ -66,7 +66,16 @@ pub async fn cache_userdata(
             Ok(userdata_hash)
         })
     })?;
-    state.userdata_cache.remember(&userdata_hash, &userdata);
+    let evicted = state.userdata_cache.remember(&userdata_hash, &userdata);
+    if !evicted.is_empty() {
+        tracing::debug!(
+            op_id,
+            op = "cache_userdata",
+            evicted_userdata = evicted.len(),
+            capacity = state.userdata_cache.capacity(),
+            "Evicted least recently used userdata"
+        );
+    }
 
     tracing::info!(
         op_id,
@@ -95,7 +104,8 @@ pub async fn world_bloom_support_cards(
     let request_started = Instant::now();
     let options = parse_json_body::<WorldBloomSupportOptions>(&body, "world bloom support cards")?;
     let userdata_hash = normalize_userdata_hash(options.userdata_hash.as_deref());
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref(), &options.region)?;
 
     tracing::info!(
         op_id,
@@ -185,9 +195,13 @@ pub async fn update_masterdata(
         );
     }
     tokio::task::block_in_place(|| {
-        run_engine_exclusive_op(state.as_ref(), op_id, "update_masterdata", true, |engine| {
-            engine.update_masterdata(&resolved_base_dir, &req.region)
-        })
+        run_engine_exclusive_op(
+            state.as_ref(),
+            op_id,
+            "update_masterdata",
+            UserdataInvalidation::Region(&req.region),
+            |engine| engine.update_masterdata(&resolved_base_dir, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -241,7 +255,7 @@ pub async fn update_masterdata_from_json(
             state.as_ref(),
             op_id,
             "update_masterdata_from_json",
-            true,
+            UserdataInvalidation::Region(&req.region),
             |engine| engine.update_masterdata_from_json(&req.data, &req.region),
         )
     })?;
@@ -323,9 +337,13 @@ pub async fn update_musicmetas(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_exclusive_op(state.as_ref(), op_id, "update_musicmetas", true, |engine| {
-            engine.update_musicmetas(&req.file_path, &req.region)
-        })
+        run_engine_exclusive_op(
+            state.as_ref(),
+            op_id,
+            "update_musicmetas",
+            UserdataInvalidation::Region(&req.region),
+            |engine| engine.update_musicmetas(&req.file_path, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -354,7 +372,7 @@ pub async fn update_musicmetas_from_string(
             state.as_ref(),
             op_id,
             "update_musicmetas_from_string",
-            true,
+            UserdataInvalidation::Region(&req.region),
             |engine| engine.update_musicmetas_from_string(&req.data, &req.region),
         )
     })?;
@@ -427,7 +445,8 @@ async fn recommend_legacy(
     let meta: RecommendRequestMeta = sonic_rs::from_slice(body.as_ref())
         .map_err(|e| AppError::BadRequest(format!("invalid recommend payload: {e}")))?;
     let userdata_hash = normalize_userdata_hash(meta.userdata_hash.as_deref());
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref(), &meta.region)?;
     let default_timeout_ms = state.debug.default_recommend_timeout_ms;
     let timeout_ms = meta.timeout_ms.or(default_timeout_ms).unwrap_or_default();
     tracing::info!(
@@ -502,8 +521,9 @@ async fn recommend_batch(
         .into_iter()
         .map(|option| option.as_raw_str().to_owned())
         .collect::<Vec<_>>();
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?
-        .expect("batch recommend requires userdata payload");
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()), &region)?
+            .expect("batch recommend requires userdata payload");
     let default_timeout_ms = state.debug.default_recommend_timeout_ms;
     let results = if state.debug.engine_thread_count > 1 {
         tokio::task::block_in_place(|| {
@@ -997,11 +1017,12 @@ fn normalize_userdata_hash(userdata_hash: Option<&str>) -> Option<String> {
 fn resolve_userdata_payload(
     state: &AppState,
     userdata_hash: Option<&str>,
+    region: &str,
 ) -> Result<Option<Arc<str>>, AppError> {
     let Some(userdata_hash) = normalize_userdata_hash(userdata_hash) else {
         return Ok(None);
     };
-    match state.userdata_cache.get(&userdata_hash) {
+    match state.userdata_cache.get(&userdata_hash, Some(region)) {
         Some(payload) => Ok(Some(payload)),
         None => Err(AppError::BadRequest(format!(
             "unknown userdata_hash: {userdata_hash}; call /cache_userdata first"
@@ -1144,7 +1165,7 @@ fn run_engine_exclusive_op<T, F>(
     state: &AppState,
     op_id: u64,
     op_name: &'static str,
-    clear_userdata_cache_on_success: bool,
+    invalidate: UserdataInvalidation<'_>,
     f: F,
 ) -> Result<T, AppError>
 where
@@ -1190,13 +1211,14 @@ where
         .next()
         .ok_or_else(|| AppError::Engine("engine pool is empty".into()))?;
     let result = f(engine).map_err(AppError::Engine)?;
-    if clear_userdata_cache_on_success {
-        engines.clear_userdata_hashes();
-        state.userdata_cache.clear();
+    if !matches!(invalidate, UserdataInvalidation::None) {
+        let evicted = invalidate_userdata(&state.userdata_cache, &mut engines, invalidate);
         tracing::info!(
             op_id,
             op = op_name,
-            "Cleared cached userdata state after exclusive engine update"
+            invalidation = ?invalidate,
+            evicted_userdata = evicted,
+            "Invalidated cached userdata state after exclusive engine update"
         );
     }
     let engine_elapsed = engine_started.elapsed();

@@ -226,6 +226,16 @@ pub async fn update_masterdata_from_json(
             audit.empty_key_tables.join(",")
         )));
     }
+    if !audit.missing_optional_keys.is_empty() {
+        tracing::warn!(
+            op_id,
+            op = "update_masterdata_from_json",
+            region = %req.region,
+            missing_optional_count = audit.missing_optional_keys.len(),
+            missing_optional = %audit.missing_optional_keys.join(","),
+            "Pushed master data lacks optional keys; the engine treats them as empty"
+        );
+    }
     tokio::task::block_in_place(|| {
         run_engine_exclusive_op(
             state.as_ref(),

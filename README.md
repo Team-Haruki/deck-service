@@ -363,9 +363,16 @@ re-checks music metas (conditional GET), a changed `contentHash` reloads.
 a non-empty JSON array; the region keeps its previously loaded data.
 
 GET /state/masterdata
-→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest" } } }
+→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest", "missingOptionalKeys": ["ingameNotes", …] } } }
 Only registry-loaded regions are listed; directory-loaded regions have no
-version identity and are omitted.
+version identity and are omitted. `missingOptionalKeys` (sorted) is present
+only when the loaded manifest lacked optional engine keys; the load still
+succeeds, the engine treats those tables as empty, and a warn log
+(`missing_optional_count`, `missing_optional`) is emitted. The engine's own
+stderr line `master data key not found: <key>` keeps printing; the Rust warn is
+the structured one. Missing World Link finale tables
+(`worldBloomSupportDeckUnitEventLimitedBonuses` and friends) make finale
+requests fail per request rather than compute a zero bonus.
 
 POST /update/masterdata   (legacy directory path, kept for one release)
 { "base_dir": "/path/to/masterdata", "region": "jp" }
@@ -382,7 +389,8 @@ POST /update/masterdata/json
 400 `masterdata key tables are empty: <names>` when a key table (same list as
 the registry path) is not a non-empty JSON array. Keys are normalised like the
 engine does (`master/cards.json` → `cards`) before the check; the engine is
-not touched on either 400.
+not touched on either 400. Missing optional keys never fail the push; they are
+logged as a warning (`missing_optional_count`, `missing_optional`).
 ```
 
 The directory path (`POST /update/masterdata`) is not audited: its files are

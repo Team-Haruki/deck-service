@@ -160,6 +160,10 @@ pub struct RegionMasterState {
     pub music_metas_digest: Option<String>,
     #[serde(skip)]
     pub music_metas_etag: Option<String>,
+    /// E10: optional engine keys the loaded manifest lacked (sorted); the
+    /// engine treats them as empty tables.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_optional_keys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -455,6 +459,17 @@ pub async fn ensure_region(
     if !audit.empty_key_tables.is_empty() {
         return Err(RegistryError::EmptyKeyTables(audit.empty_key_tables));
     }
+    // E10: never strict-fail on optional keys, only warn and record them.
+    if !audit.missing_optional_keys.is_empty() {
+        tracing::warn!(
+            region = %region,
+            reason,
+            content_hash = %manifest.content_hash,
+            missing_optional_count = audit.missing_optional_keys.len(),
+            missing_optional = %audit.missing_optional_keys.join(","),
+            "Registry manifest lacks optional master data keys; the engine treats them as empty"
+        );
+    }
     let metas = client.fetch_music_metas(&region, None).await?;
     let (metas_body, metas_etag) = match metas {
         Fetched::Body { bytes, etag } => (Some(bytes), etag),
@@ -488,6 +503,7 @@ pub async fn ensure_region(
         source: "registry",
         music_metas_digest: metas_text.as_deref().map(digest_hex),
         music_metas_etag: metas_etag,
+        missing_optional_keys: audit.missing_optional_keys,
     };
     state
         .masterdata_state
@@ -910,6 +926,9 @@ mod tests {
             Some(digest_hex(MUSIC_METAS_V1).as_str())
         );
         assert!(outcome.state.loaded_at > 0);
+        assert!(outcome.state.missing_optional_keys.is_empty());
+        let text = sonic_rs::to_string(&outcome.state).unwrap();
+        assert!(!text.contains("missingOptionalKeys"), "{text}");
         assert_eq!(counts(&registry), (1, 37, 1));
         assert!(state.masterdata_state.lock().contains_key("jp"));
 
@@ -945,6 +964,33 @@ mod tests {
         assert!(outcome.reloaded);
         assert_eq!(outcome.state.content_hash, hash_v2);
         assert_eq!(counts(&registry), (4, 37 + 36, 4));
+        assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
+        let text = sonic_rs::to_string(&outcome.state).unwrap();
+        assert!(
+            text.contains("\"missingOptionalKeys\":[\"ingameNotes\"]"),
+            "{text}"
+        );
+
+        // E10: a music-metas-only refresh keeps the recorded list, and
+        // /state/masterdata reports it.
+        publish_metas(&registry, "jp", MUSIC_METAS_V1);
+        let outcome = ensure_region(&state, "jp", None, "refresh").await.unwrap();
+        assert!(!outcome.reloaded);
+        assert_eq!(
+            outcome.state.music_metas_digest.as_deref(),
+            Some(digest_hex(MUSIC_METAS_V1).as_str())
+        );
+        assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
+        let axum::Json(snapshot) = crate::handlers::masterdata_state(State(state.clone())).await;
+        assert_eq!(
+            snapshot.regions["jp"].missing_optional_keys,
+            ["ingameNotes"]
+        );
+        let text = sonic_rs::to_string(&snapshot).unwrap();
+        assert!(
+            text.contains("\"missingOptionalKeys\":[\"ingameNotes\"]"),
+            "{text}"
+        );
 
         // A manifest missing a required key is rejected and nothing changes.
         let mut broken = all_keys();
@@ -1086,6 +1132,7 @@ mod tests {
         assert!(text.contains("\"source\":\"registry\""), "{text}");
         assert!(text.contains("\"musicMetasDigest\""), "{text}");
         assert!(!text.contains("music_metas_etag"), "{text}");
+        assert!(!text.contains("missingOptionalKeys"), "{text}");
 
         let err = update_masterdata_from_registry(
             State(state),

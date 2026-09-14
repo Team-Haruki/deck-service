@@ -467,6 +467,7 @@ fn run_native_cpp_tools(root: &Path, cpp_root: &Path, out_dir: &Path, coverage: 
 }
 
 fn emit_rerun_metadata(root: &Path, cpp_root: &Path) {
+    println!("cargo:rustc-env=DECK_CPP_SRC_DIR={}", cpp_root.display());
     println!("cargo:rerun-if-env-changed=DECK_CPP_SRC");
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=CC");

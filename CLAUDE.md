@@ -46,7 +46,7 @@ The C++ static library is built by `build.zig` for Zig-backed targets. Cargo use
 - **Reader** (`checkout`): acquires one engine slot for a single recommend call. Multiple readers run concurrently.
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers.
 
-Userdata is cached server-side: clients call `/cache_userdata` first, then reference the returned hash in subsequent `/recommend` calls. Each engine slot tracks which userdata hashes it has loaded to avoid redundant FFI calls. `UserdataCache` is an LRU capped by `DECK_USERDATA_CACHE_MAX` (default 64) whose entries are tagged with the regions that used them; exclusive region updates go through `invalidate_userdata` (`UserdataInvalidation::Region`), which drops that region's and never-used entries and prunes only those hashes from the engine slots.
+Userdata is cached server-side: clients call `/cache_userdata` first, then reference the returned hash in subsequent `/recommend` calls. Each engine slot tracks which userdata hashes it has loaded to avoid redundant FFI calls. `UserdataCache` (`src/userdata_cache.rs`) is an LRU bounded by entries, bytes and idle TTL whose entries are tagged with the regions that used them; exclusive region updates go through `invalidate_userdata` (`UserdataInvalidation::Region`), which drops that region's and never-used entries and prunes only those hashes from the engine slots.
 
 ## Key Environment Variables
 
@@ -60,7 +60,7 @@ Userdata is cached server-side: clients call `/cache_userdata` first, then refer
 - `DECK_MUSICMETAS_FILE_<REGION>` -- explicit music metas file for one region
 - `DECK_MASTERDATA_REFRESH_MS` -- legacy: masterdata directory refresh watcher interval (default: 300000)
 - `DECK_ENGINE_POOL_SIZE` -- number of engine instances
-- `DECK_USERDATA_CACHE_MAX` -- userdata payload cache cap, LRU (default: 64)
+- `DECK_USERDATA_CACHE_MAX_ENTRIES` / `DECK_USERDATA_CACHE_MAX_BYTES` / `DECK_USERDATA_CACHE_TTL_SECONDS` -- userdata payload cache bounds (defaults: 128 / 256 MiB / 1800 s)
 - `DECK_ENGINE_THREADS` -- C++ engine-internal thread count (default: 1); keep `pool size x engine threads` within the CPU count
 - `DECK_RECOMMEND_TIMEOUT_MS` -- default timeout injected when requests omit `timeout_ms`
 - `DECK_LOCK_WARN_MS` / `DECK_LOCK_TIMEOUT_MS` / `DECK_ENGINE_WARN_MS` -- pool wait warn threshold, pool acquire timeout, engine op warn threshold

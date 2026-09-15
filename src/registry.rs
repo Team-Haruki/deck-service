@@ -965,11 +965,11 @@ mod tests {
         assert_eq!(counts(&registry), (3, 37, 3));
 
         // E7: seed userdata tagged cn, tagged jp, and never used.
-        state.userdata_cache.remember("h-cn", "{}");
+        state.userdata_cache.remember("h-cn", "{}").unwrap();
         assert!(state.userdata_cache.get("h-cn", Some("cn")).is_some());
-        state.userdata_cache.remember("h-jp", "{}");
+        state.userdata_cache.remember("h-jp", "{}").unwrap();
         assert!(state.userdata_cache.get("h-jp", Some("jp")).is_some());
-        state.userdata_cache.remember("h-none", "{}");
+        state.userdata_cache.remember("h-none", "{}").unwrap();
         {
             let mut lease = state.engines.checkout(Duration::from_secs(1)).unwrap();
             lease.remember_userdata_hash("h-cn");

@@ -33,7 +33,7 @@ FFI boundary uses JSON strings. `DeckRecommend` handle is `Send` (not `Sync`), c
 - `EnginePool` manages N engine instances (default: `min(cpu_count, 4)`)
 - `checkout`: acquires one slot for recommend calls (concurrent readers)
 - `checkout_all`: exclusive access for broadcast updates (masterdata/musicmetas)
-- `UserdataCache` holds userdata payloads (LRU, `DECK_USERDATA_CACHE_MAX`, default 64, entries tagged by the regions that used them); each engine slot tracks loaded hashes to skip redundant FFI calls; exclusive updates invalidate through `invalidate_userdata` with `UserdataInvalidation::Region`
+- `UserdataCache` holds userdata payloads (LRU bounded by `DECK_USERDATA_CACHE_MAX_ENTRIES`/`_MAX_BYTES`/`_TTL_SECONDS`, entries tagged by the regions that used them); each engine slot tracks loaded hashes to skip redundant FFI calls; exclusive updates invalidate through `invalidate_userdata` with `UserdataInvalidation::Region`
 
 ## Key Files
 

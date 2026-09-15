@@ -168,7 +168,18 @@ fn changed(mut options: Value, key: &str, value: Value) -> Value {
 
 #[test]
 fn bridge_validates_recommendation_options_and_shared_caches() {
-    DeckRecommend::init_data_path(concat!(env!("CARGO_MANIFEST_DIR"), "/_cpp_src/data")).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cpp_source = std::env::var_os("DECK_CPP_SRC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let bundled = root.join("_cpp_src");
+            if bundled.is_dir() {
+                bundled
+            } else {
+                root.join("../sekai-deck-recommend-cpp")
+            }
+        });
+    DeckRecommend::init_data_path(cpp_source.join("data").to_str().unwrap()).unwrap();
 
     let masterdata = minimal_masterdata();
     let engine = DeckRecommend::new().unwrap();
@@ -302,6 +313,19 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
         changed(base.clone(), "world_bloom_event_turn", json!(3)),
         "world_bloom_character_id is required",
     );
+    expect_recommend_error(
+        &second_engine,
+        changed(base.clone(), "world_bloom_finale_turn", json!(1)),
+        "Invalid world bloom finale turn",
+    );
+    let finale = changed(
+        changed(base.clone(), "world_bloom_finale_turn", json!(3)),
+        "world_bloom_character_id",
+        json!(21),
+    );
+    if let Err(error) = call_recommend(&second_engine, &finale) {
+        assert!(!error.contains("World bloom chapter not found"));
+    }
 
     let challenge = changed(base.clone(), "live_type", json!("challenge"));
     expect_recommend_error(
@@ -513,6 +537,19 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
         )
         .unwrap();
     assert_eq!(support, "[]");
+
+    let finale_support = second_engine
+        .get_world_bloom_support_cards_raw(
+            &sonic_rs::to_string(&json!({
+                "region": "jp",
+                "userdata_hash": active_hash,
+                "world_bloom_finale_turn": 3,
+                "forced_leader_character_id": 21
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(finale_support, "[]");
 }
 
 unsafe fn take_c_string(ptr: *const c_char) -> Option<String> {

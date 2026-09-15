@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -43,7 +43,7 @@ pub struct EnginePool {
 
 struct EngineSlot {
     engine: DeckRecommend,
-    userdata_hashes: HashSet<String>,
+    userdata_hashes: VecDeque<String>,
 }
 
 struct EnginePoolState {
@@ -53,7 +53,7 @@ struct EnginePoolState {
     pending_writers: usize,
 }
 
-pub const DEFAULT_USERDATA_CACHE_MAX: usize = 64;
+pub use crate::userdata_cache::UserdataCache;
 
 /// How an exclusive engine update invalidates cached userdata.
 #[derive(Clone, Copy, Debug)]
@@ -61,142 +61,6 @@ pub enum UserdataInvalidation<'a> {
     None,
     Region(&'a str),
     All,
-}
-
-struct UserdataEntry {
-    payload: Arc<str>,
-    /// Lowercase regions this entry has been used with; empty = never used.
-    regions: Vec<String>,
-}
-
-#[derive(Default)]
-struct UserdataCacheInner {
-    entries: HashMap<String, UserdataEntry>,
-    /// Front = least recently used.
-    order: VecDeque<String>,
-}
-
-impl UserdataCacheInner {
-    fn touch(&mut self, hash: &str) {
-        self.order.retain(|h| h != hash);
-        self.order.push_back(hash.to_string());
-    }
-
-    fn remove_all(&mut self, hashes: &[String]) {
-        for hash in hashes {
-            self.entries.remove(hash);
-        }
-        self.order.retain(|h| self.entries.contains_key(h));
-    }
-}
-
-/// Bounded LRU of userdata payloads keyed by hash, tagged with the regions
-/// they were used with so a region update can keep other regions' entries.
-pub struct UserdataCache {
-    inner: Mutex<UserdataCacheInner>,
-    capacity: usize,
-}
-
-impl Default for UserdataCache {
-    fn default() -> Self {
-        Self::new(DEFAULT_USERDATA_CACHE_MAX)
-    }
-}
-
-impl UserdataCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            inner: Mutex::new(UserdataCacheInner::default()),
-            capacity: capacity.max(1),
-        }
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.lock().entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Insert or replace; moves `hash` to MRU; evicts LRU entries while
-    /// len > capacity. Returns the evicted hashes.
-    pub fn remember(&self, hash: &str, userdata: &str) -> Vec<String> {
-        let hash = hash.trim();
-        if hash.is_empty() {
-            return Vec::new();
-        }
-        let payload = Arc::<str>::from(userdata);
-        let mut inner = self.inner.lock();
-        match inner.entries.get_mut(hash) {
-            Some(entry) => entry.payload = payload,
-            None => {
-                inner.entries.insert(
-                    hash.to_string(),
-                    UserdataEntry {
-                        payload,
-                        regions: Vec::new(),
-                    },
-                );
-            }
-        }
-        inner.touch(hash);
-
-        let mut evicted = Vec::new();
-        while inner.entries.len() > self.capacity {
-            let Some(oldest) = inner.order.pop_front() else {
-                break;
-            };
-            inner.entries.remove(&oldest);
-            evicted.push(oldest);
-        }
-        evicted
-    }
-
-    /// Payload lookup; bumps recency. `region = Some(r)` also tags the entry with `r`.
-    pub fn get(&self, hash: &str, region: Option<&str>) -> Option<Arc<str>> {
-        let hash = hash.trim();
-        let mut inner = self.inner.lock();
-        let entry = inner.entries.get_mut(hash)?;
-        if let Some(region) = region.map(normalize_region)
-            && !region.is_empty()
-            && !entry.regions.contains(&region)
-        {
-            entry.regions.push(region);
-        }
-        let payload = Arc::clone(&entry.payload);
-        inner.touch(hash);
-        Some(payload)
-    }
-
-    pub fn clear(&self) -> Vec<String> {
-        let mut inner = self.inner.lock();
-        inner.order.clear();
-        inner.entries.drain().map(|(hash, _)| hash).collect()
-    }
-
-    /// Evicts entries tagged with `region` plus untagged entries; keeps entries
-    /// tagged only with other regions. Returns the evicted hashes.
-    pub fn clear_region(&self, region: &str) -> Vec<String> {
-        let region = normalize_region(region);
-        let mut inner = self.inner.lock();
-        let evicted: Vec<String> = inner
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.regions.is_empty() || entry.regions.contains(&region))
-            .map(|(hash, _)| hash.clone())
-            .collect();
-        inner.remove_all(&evicted);
-        evicted
-    }
-}
-
-fn normalize_region(region: &str) -> String {
-    region.trim().to_ascii_lowercase()
 }
 
 /// Apply `how` to both the Rust payload cache and every engine slot's hash set.
@@ -258,7 +122,7 @@ impl EnginePool {
         for _ in 0..size {
             available.push(EngineSlot {
                 engine: DeckRecommend::new()?,
-                userdata_hashes: HashSet::new(),
+                userdata_hashes: VecDeque::new(),
             });
         }
 
@@ -350,7 +214,8 @@ impl EngineLease<'_> {
                 .as_ref()
                 .expect("engine lease accessed after release")
                 .userdata_hashes
-                .contains(hash)
+                .iter()
+                .any(|value| value == hash)
     }
 
     pub fn remember_userdata_hash(&mut self, hash: &str) {
@@ -358,11 +223,17 @@ impl EngineLease<'_> {
         if hash.is_empty() {
             return;
         }
-        self.slot
+        let hashes = &mut self
+            .slot
             .as_mut()
             .expect("engine lease accessed after release")
-            .userdata_hashes
-            .insert(hash.to_string());
+            .userdata_hashes;
+        if !hashes.iter().any(|value| value == hash) {
+            if hashes.len() >= 64 {
+                hashes.pop_front();
+            }
+            hashes.push_back(hash.to_owned());
+        }
     }
 
     pub fn forget_userdata_hash(&mut self, hash: &str) {
@@ -374,7 +245,7 @@ impl EngineLease<'_> {
             .as_mut()
             .expect("engine lease accessed after release")
             .userdata_hashes
-            .remove(hash);
+            .retain(|value| value != hash);
     }
 }
 
@@ -419,9 +290,8 @@ impl ExclusiveEngineLease<'_> {
             return;
         }
         for slot in &mut self.state.available {
-            for hash in hashes {
-                slot.userdata_hashes.remove(hash);
-            }
+            slot.userdata_hashes
+                .retain(|value| !hashes.iter().any(|hash| hash == value));
         }
     }
 }
@@ -435,128 +305,23 @@ impl Drop for ExclusiveEngineLease<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
 
-    fn set(hashes: Vec<String>) -> HashSet<String> {
-        hashes.into_iter().collect()
-    }
-
     #[test]
-    fn capacity_is_at_least_one() {
-        assert_eq!(UserdataCache::new(0).capacity(), 1);
-        assert_eq!(
-            UserdataCache::default().capacity(),
-            DEFAULT_USERDATA_CACHE_MAX
-        );
-        assert_eq!(DEFAULT_USERDATA_CACHE_MAX, 64);
-        let cache = UserdataCache::new(3);
-        assert!(cache.is_empty());
-        assert!(cache.remember("A", "{}").is_empty());
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.is_empty());
-    }
-
-    #[test]
-    fn remember_evicts_least_recently_used() {
-        let cache = UserdataCache::new(2);
-        assert!(cache.remember("A", "a").is_empty());
-        assert!(cache.remember("B", "b").is_empty());
-        assert_eq!(cache.remember("C", "c"), vec!["A".to_string()]);
-        assert!(cache.get("A", None).is_none());
-        assert_eq!(cache.get("B", None).as_deref(), Some("b"));
-        assert_eq!(cache.get("C", None).as_deref(), Some("c"));
-        assert_eq!(cache.len(), 2);
-    }
-
-    #[test]
-    fn get_bumps_recency() {
-        let cache = UserdataCache::new(2);
-        cache.remember("A", "a");
-        cache.remember("B", "b");
-        assert!(cache.get(" A ", None).is_some());
-        assert_eq!(cache.remember("C", "c"), vec!["B".to_string()]);
-        assert!(cache.get("A", None).is_some());
-        assert!(cache.get("B", None).is_none());
-    }
-
-    #[test]
-    fn remember_existing_key_moves_to_back_and_keeps_tags() {
-        let cache = UserdataCache::new(2);
-        cache.remember("A", "a1");
-        assert!(cache.get("A", Some("jp")).is_some());
-        cache.remember("B", "b");
-        assert!(cache.remember("A", "a2").is_empty());
-        assert_eq!(cache.remember("C", "c"), vec!["B".to_string()]);
-        assert_eq!(cache.get("A", None).as_deref(), Some("a2"));
-
-        // C is untagged and goes; A stays because its jp tag survived the replace.
-        assert_eq!(cache.clear_region("cn"), vec!["C".to_string()]);
-        assert!(cache.get("A", None).is_some());
-        assert_eq!(cache.clear_region("jp"), vec!["A".to_string()]);
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn clear_region_evicts_tagged_and_untagged_only() {
-        let cache = UserdataCache::new(8);
-        cache.remember("A", "a");
-        cache.remember("B", "b");
-        cache.remember("C", "c");
-        cache.get("A", Some("jp"));
-        cache.get("B", Some("CN"));
-
-        assert_eq!(
-            set(cache.clear_region("JP ")),
-            set(vec!["A".to_string(), "C".to_string()])
-        );
-        assert!(cache.get("B", None).is_some());
-        assert!(cache.get("A", None).is_none());
-        assert_eq!(cache.len(), 1);
-        // The LRU order no longer references evicted hashes.
-        cache.remember("D", "d");
-        assert_eq!(cache.len(), 2);
-    }
-
-    #[test]
-    fn clear_region_evicts_multi_region_entry() {
-        let cache = UserdataCache::new(8);
-        cache.remember("A", "a");
-        cache.get("A", Some("jp"));
-        cache.get("A", Some("cn"));
-        cache.get("A", Some("jp"));
-        cache.remember("B", "b");
-        cache.get("B", Some("jp"));
-
-        assert_eq!(cache.clear_region("cn"), vec!["A".to_string()]);
-        assert!(cache.get("B", None).is_some());
-    }
-
-    #[test]
-    fn clear_returns_everything() {
-        let cache = UserdataCache::new(8);
-        cache.remember("A", "a");
-        cache.remember("B", "b");
-        cache.get("B", Some("jp"));
-        assert_eq!(
-            set(cache.clear()),
-            set(vec!["A".to_string(), "B".to_string()])
-        );
-        assert!(cache.is_empty());
-        assert!(cache.clear().is_empty());
-        assert!(cache.clear_region("jp").is_empty());
-    }
-
-    #[test]
-    fn blank_hash_is_ignored() {
-        let cache = UserdataCache::new(1);
-        assert!(cache.remember("  ", "x").is_empty());
-        assert!(cache.is_empty());
-        assert!(cache.get("", Some("jp")).is_none());
-        cache.remember(" A ", "a");
-        assert_eq!(cache.get("A", Some(" ")).as_deref(), Some("a"));
-        // A blank region is not a tag, so A is still untagged.
-        assert_eq!(cache.clear_region("kr"), vec!["A".to_string()]);
+    fn engine_hash_tracking_is_bounded_and_can_be_replayed() {
+        let pool = EnginePool::new(1).unwrap();
+        let mut engine = pool.checkout(Duration::from_secs(1)).unwrap();
+        for i in 0..100 {
+            engine.remember_userdata_hash(&i.to_string());
+        }
+        assert_eq!(engine.slot.as_ref().unwrap().userdata_hashes.len(), 64);
+        assert!(!engine.has_userdata_hash("0"));
+        assert!(engine.has_userdata_hash("99"));
+        engine.remember_userdata_hash("99");
+        assert_eq!(engine.slot.as_ref().unwrap().userdata_hashes.len(), 64);
+        engine.forget_userdata_hash("99");
+        assert!(!engine.has_userdata_hash("99"));
+        engine.remember_userdata_hash("0");
+        assert!(engine.has_userdata_hash("0"));
     }
 }

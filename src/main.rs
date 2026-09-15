@@ -16,8 +16,7 @@ use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::registry::{self, RegistryClient, RegistryConfig};
 use deck_service::state::{
-    AppState, DEFAULT_USERDATA_CACHE_MAX, DebugConfig, EnginePool, UserdataCache,
-    UserdataInvalidation, invalidate_userdata,
+    AppState, DebugConfig, EnginePool, UserdataCache, UserdataInvalidation, invalidate_userdata,
 };
 
 #[tokio::main]
@@ -83,10 +82,25 @@ async fn main() {
             engine_thread_count,
         },
         userdata_cache: UserdataCache::new(
-            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX").unwrap_or(DEFAULT_USERDATA_CACHE_MAX),
+            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX_BYTES")
+                .unwrap_or(deck_service::userdata_cache::DEFAULT_MAX_BYTES),
+            env_usize_at_least_one("DECK_USERDATA_CACHE_MAX_ENTRIES")
+                .unwrap_or(deck_service::userdata_cache::DEFAULT_MAX_ENTRIES),
+            Duration::from_secs(
+                env_usize_at_least_one("DECK_USERDATA_CACHE_TTL_SECONDS").unwrap_or(1800) as u64,
+            ),
         ),
         registry: registry_client,
         masterdata_state: parking_lot::Mutex::new(HashMap::new()),
+    });
+
+    let cache_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            timer.tick().await;
+            cache_state.userdata_cache.expire();
+        }
     });
 
     // Regions served by the registry skip the directory path entirely;
@@ -114,12 +128,13 @@ async fn main() {
         engine_thread_count,
         available_parallelism,
         default_recommend_timeout_ms = default_recommend_timeout_ms.unwrap_or_default(),
-        userdata_cache_max = state.userdata_cache.capacity(),
+        userdata_cache_max_entries = state.userdata_cache.stats().max_entries,
         "Initialized deck-service debug thresholds"
     );
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/cache/stats", get(handlers::userdata_cache_stats))
         .route("/cache_userdata", post(handlers::cache_userdata))
         .route("/recommend", post(handlers::recommend))
         .route("/calculate", post(handlers::calculate))

@@ -18,7 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   DECK_CPP_REPO: https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
   DECK_CPP_BRANCH: master
-  DECK_CPP_REF: b2387b7f09e5a420c9bfee9ece8903b345dd39cd
+  DECK_CPP_REF: 05111fd203202b48efe61ebcbaf926e2b4d4dbb8
 
 jobs:
   rust:
@@ -40,7 +40,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check

@@ -143,7 +143,7 @@ docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-servi
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `b2387b7f09e5a420c9bfee9ece8903b345dd39cd`;
+`master` at commit `05111fd203202b48efe61ebcbaf926e2b4d4dbb8`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 
@@ -189,6 +189,7 @@ Content-Type: application/json
 | `event_unit` | `string` | Event unit |
 | `event_type` | `string` | Event type |
 | `world_bloom_event_turn` | `int` | World bloom event turn |
+| `world_bloom_finale_turn` | `int` | Simulated World Bloom finale turn (`2` or `3`) |
 | `world_bloom_character_id` | `int` | World bloom character ID |
 | `challenge_live_character_id` | `int` | Challenge live character ID |
 | `limit` | `int` | Max number of result decks |
@@ -331,8 +332,8 @@ POST /world_bloom/support_cards
 {
   "region": "jp",
   "userdata_hash": "...",
-  "event_id": 123,
-  "world_bloom_character_id": 1,
+  "world_bloom_finale_turn": 3,
+  "forced_leader_character_id": 1,
   "support_master_max": true,
   "support_skill_max": true
 }
@@ -486,3 +487,15 @@ LGPL-2.1 — see [LICENSE](LICENSE).
 - [xfl03/sekai-calculator](https://github.com/xfl03/sekai-calculator) — original algorithms and implementation
 - [NeuraXmy/sekai-deck-recommend-cpp](https://github.com/NeuraXmy/sekai-deck-recommend-cpp) — C++ engine original implementation
 - [Team-Haruki/sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) — current C++ engine maintenance, Python package, and WebAssembly/npm target
+
+## User data cache limits
+
+The Rust replay cache uses LRU eviction, a byte budget and an idle TTL. Defaults:
+
+- `DECK_USERDATA_CACHE_MAX_BYTES=268435456` (256 MiB, including estimated entry metadata).
+- `DECK_USERDATA_CACHE_MAX_ENTRIES=128`.
+- `DECK_USERDATA_CACHE_TTL_SECONDS=1800` (30 minutes since the last cache access).
+
+Idle entries are removed on access and by a 60-second sweep. Each payload is limited to 32 MiB; compressed protocol decoding is limited to 64 MiB. Cache eviction leaves in-flight `Arc` references valid, so these limits describe retained cache data, not total process RSS. Each engine tracks at most 64 loaded hashes, matching the C++ cache capacity.
+
+`GET /cache/stats` reports counts, estimated bytes, limits and evictions, without payloads or user hashes. An expired or evicted hash returns `User data not found for userdata_hash`; clients must upload the snapshot again before retrying. Haruki Cloud handles this automatically.

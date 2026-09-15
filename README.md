@@ -79,16 +79,21 @@ Output: `target/x86_64-unknown-linux-musl/release/deck-service` (~4 MB, statical
 ```bash
 # Required: path to the C++ engine's static data directory.
 # This is the upstream static data/, not runtime masterdata/music metas.
+# Treated as read-only static data; the RL seed cache goes to DECK_RL_SEED_CACHE_FILE.
 export DECK_DATA_DIR=/path/to/_cpp_src/data
+
+# Optional: writable RL seed cache file (unset -> $DECK_DATA_DIR/rl_seed_cache.tsv;
+# DECK_RL_SEED_CACHE_DISABLE=1 turns persistence off)
+export DECK_RL_SEED_CACHE_FILE=/path/to/cache/rl_seed_cache.tsv
 
 # Preferred: pull master data (and music metas) from the Haruki master registry.
 # Plain http on the private network; replaces the mounted masterdata volume.
 export DECK_REGISTRY_URL=http://100.76.159.97:9998
 
-# Legacy: preload region masterdata from a mounted directory at startup
+# Legacy/deprecated: preload region masterdata from a mounted directory at startup
 export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
 
-# Optional: poll mounted masterdata for changes (ms, default: 300000; 0 disables)
+# Optional (legacy directory path): poll mounted masterdata for changes (ms, default: 300000; 0 disables)
 export DECK_MASTERDATA_REFRESH_MS=300000
 
 # Optional: preload music metas at startup
@@ -121,7 +126,9 @@ export DECK_RECOMMEND_TIMEOUT_MS=15000
 Masterdata, music metas, and userdata are application/runtime inputs. They are
 not bundled by the upstream WebAssembly npm package, and deck-service follows
 the same model: static engine data comes from `_cpp_src/data`, while region data
-is loaded by startup env vars or update endpoints.
+is loaded by startup env vars or update endpoints. Prefer `DECK_REGISTRY_URL`;
+the masterdata directory path (`DECK_MASTERDATA_BASE_DIR` and
+`POST /update/masterdata`) is legacy and deprecated.
 
 ## Upstream Packages
 
@@ -138,8 +145,20 @@ engine sources directly through `cpp_bridge/`.
 
 ```bash
 docker build -t deck-service .
-docker run -p 3000:3000 -v /path/to/data:/data -e DECK_DATA_DIR=/data deck-service
+docker run -p 3000:3000 -v deck-rl-cache:/cache deck-service
 ```
+
+The container has three different mounts, each with its own role:
+
+- `/data` is the engine's static data, baked into the image and read-only
+  (`DECK_DATA_DIR=/data`).
+- `/cache` holds the RL seed cache (`DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv`)
+  and must be writable by uid 65532: use a named volume (seeded with the right
+  ownership from the image) or a host directory after `chown 65532:65532`. With a
+  read-only root filesystem, mount a named volume or tmpfs there. At startup the
+  service logs `RL seed cache enabled`, a not-writable warning, or `disabled`.
+- Master data comes from `DECK_REGISTRY_URL`, or from a legacy masterdata
+  directory mounted wherever `DECK_MASTERDATA_BASE_DIR` points.
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
@@ -279,6 +298,13 @@ Response:
 Use the returned `userdata_hash` in later `/recommend` requests to avoid
 resending large userdata payloads.
 
+The server bounds cached payloads by count, bytes and idle time (see
+[User data cache limits](#user-data-cache-limits)). A hash is tagged with a region the first time a request uses
+it; a master data or music metas update for one region drops the hashes tagged
+with that region and the hashes no request has used yet. Hashes used only with
+other regions stay cached. A dropped hash makes the next request fail with
+`400 User data not found for userdata_hash`; call `/cache_userdata` again.
+
 ### Batch Recommend
 
 ```
@@ -347,7 +373,7 @@ Response: JSON array of support cards sorted by support bonus descending:
 ]
 ```
 
-### Update Masterdata (from directory)
+### Update Masterdata (registry / legacy directory)
 
 ```
 POST /update/masterdata/registry
@@ -357,15 +383,32 @@ Pulls the region's current manifest from `DECK_REGISTRY_URL`; a matching
 `content_hash` short-circuits without a round trip, an unchanged manifest only
 re-checks music metas (conditional GET), a changed `contentHash` reloads.
 502 when the registry cannot be reached, 503 when `DECK_REGISTRY_URL` is unset.
+502 `registry master data has empty key tables: <names>` when any key table
+(`areaItemLevels`, `areaItems`, `areas`, `cardEpisodes`, `cards`, `cardRarities`,
+`characterRanks`, `gameCharacters`, `gameCharacterUnits`, `honors`,
+`masterLessons`, `musicDifficulties`, `musics`, `musicVocals`, `skills`) is not
+a non-empty JSON array; the region keeps its previously loaded data.
 
 GET /state/masterdata
-→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest" } } }
+→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest", "missingOptionalKeys": ["ingameNotes", …] } } }
 Only registry-loaded regions are listed; directory-loaded regions have no
-version identity and are omitted.
+version identity and are omitted. `missingOptionalKeys` (sorted) is present
+only when the loaded manifest lacked optional engine keys; the load still
+succeeds, the engine treats those tables as empty, and a warn log
+(`missing_optional_count`, `missing_optional`) is emitted. The engine's own
+stderr line `master data key not found: <key>` keeps printing; the Rust warn is
+the structured one. Missing World Link finale tables
+(`worldBloomSupportDeckUnitEventLimitedBonuses` and friends) make finale
+requests fail per request rather than compute a zero bonus.
 
-POST /update/masterdata   (legacy directory path, kept for one release)
+POST /update/masterdata   (Deprecated: legacy directory path)
 { "base_dir": "/path/to/masterdata", "region": "jp" }
-→ { "status": "ok" }
+→ { "status": "ok", "deprecated": true, "replacement": "/update/masterdata/registry" }
+Deprecated; use `POST /update/masterdata/registry`. Removed in the release after
+the registry fetcher (deck-service #19) ships. Status codes and error bodies are
+unchanged; a successful response carries `Deprecation: true` and
+`Link: </update/masterdata/registry>; rel="successor-version"`, and each call
+logs a warning.
 ```
 
 ### Update Masterdata (from JSON)
@@ -374,7 +417,16 @@ POST /update/masterdata   (legacy directory path, kept for one release)
 POST /update/masterdata/json
 { "data": { "cards.json": "...", "skills.json": "..." }, "region": "jp" }
 → { "status": "ok" }
+400 `masterdata lacks required keys: <names>` when a required key is absent.
+400 `masterdata key tables are empty: <names>` when a key table (same list as
+the registry path) is not a non-empty JSON array. Keys are normalised like the
+engine does (`master/cards.json` → `cards`) before the check; the engine is
+not touched on either 400. Missing optional keys never fail the push; they are
+logged as a warning (`missing_optional_count`, `missing_optional`).
 ```
+
+The directory path (`POST /update/masterdata`) is not audited: its files are
+read inside the engine.
 
 ### Update Music Metas (from file)
 
@@ -397,13 +449,16 @@ POST /update/musicmetas/string
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
+| `DECK_RL_SEED_CACHE_FILE` | image: `/cache/rl_seed_cache.tsv`; binary: unset (→ `$DECK_DATA_DIR/rl_seed_cache.tsv`) | RL seed cache file read by the engine; its directory must be writable. Checked and logged at startup |
+| `DECK_RL_SEED_CACHE_DISABLE` | unset | Set to the literal `1` to disable RL seed cache persistence |
 | `DECK_REGISTRY_URL` | unset | Master registry base URL (plain http). When set, the regions in `DECK_REGISTRY_REGIONS` are loaded from `GET /v1/master/{region}/current` + `blob/{sha256}` and `GET /v1/metas/{region}/music_metas.json` instead of the directory variables below, which then only apply to regions not listed there |
 | `DECK_REGISTRY_REGIONS` | `jp,en,cn,tw,kr` | CSV of regions served by the registry |
 | `DECK_REGISTRY_REFRESH_MS` | `300000` | Poll interval for the registry manifest (`0` disables; a reload happens only when `contentHash` changes, music metas use `If-None-Match`) |
 | `DECK_REGISTRY_FETCH_CONCURRENCY` | `8` | Parallel blob downloads per region load |
 | `DECK_REGISTRY_TIMEOUT_MS` | `30000` | Per-request timeout against the registry |
-| `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Base directory used to preload region masterdata on startup |
-| `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload masterdata for |
+| `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Legacy (deprecated directory path): base directory used to preload region masterdata on startup |
+| `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | Legacy (deprecated directory path): CSV list of regions to preload masterdata for |
+| `DECK_MASTERDATA_REFRESH_MS` | `300000` | Legacy (deprecated directory path): poll interval for mounted masterdata changes (`0` disables) |
 | `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` | masterdata base, then `/app/data` | Base directory used to preload region music metas on startup |
 | `DECK_MUSICMETAS_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload music metas for |
 | `DECK_MUSICMETAS_FILE_<REGION>` | unset | Explicit music metas file path for one region, e.g. `DECK_MUSICMETAS_FILE_JP` |
@@ -413,6 +468,9 @@ POST /update/musicmetas/string
 | `DECK_LOCK_TIMEOUT_MS` | `30000` | Fail-fast timeout for acquiring an engine pool slot |
 | `DECK_ENGINE_WARN_MS` | `10000` | Warn threshold for a single FFI/engine operation |
 | `DECK_ENGINE_POOL_SIZE` | `min(cpu_count, 4)` | Number of engine instances used for concurrent recommends |
+| `DECK_USERDATA_CACHE_MAX_BYTES` | `268435456` | Userdata cache byte budget, including estimated entry metadata |
+| `DECK_USERDATA_CACHE_MAX_ENTRIES` | `128` | Maximum cached userdata payloads (LRU) |
+| `DECK_USERDATA_CACHE_TTL_SECONDS` | `1800` | Idle time after which a cached payload is dropped |
 | `DECK_ENGINE_THREADS` | `1` | C++ engine-internal parallelism; keep `pool size × engine threads` within the available CPU count |
 | `DECK_RECOMMEND_TIMEOUT_MS` | unset | Default `timeout_ms` injected into recommend requests when missing |
 
@@ -436,25 +494,6 @@ This enables per-request `op_id` logs around:
 - per-item progress inside batch recommend
 - per-item lock wait / engine execution time inside batch recommend
 
-## Cloud Guide
-
-For production/cloud integration, see [docs/cloud-call-guide.md](docs/cloud-call-guide.md).
-
-## Local Hybrid Benchmark
-
-When `_cpp_src/` and region masterdata are available locally, you can run the built-in hybrid benchmark:
-
-```bash
-cargo run --release --bin hybrid_bench
-```
-
-The benchmark uses local snapshot JSONs under `../metadata/`, loads `music_metas` from `/tmp/music_metas_{region}.json`, and compares:
-
-- `dfs` — exact search with timeout bound
-- `ga` — pure genetic search
-- `dfs_ga` — DFS warmup to seed GA
-- `rl` — learned policy + remembered seeds + seeded GA refine
-
 ## Project Structure
 
 ```
@@ -466,6 +505,9 @@ deck-service/
 │   ├── bridge.rs        # Safe Rust wrapper around C FFI
 │   ├── ffi.rs           # Raw unsafe extern "C" bindings
 │   ├── state.rs         # Shared application state (Mutex<Engine>)
+│   ├── registry.rs      # Master registry client (manifest, blobs, music metas)
+│   ├── masterdata.rs    # Legacy masterdata directory resolution (deprecated path)
+│   ├── masterdata_audit.rs # Master data key checks (required, key tables, optional)
 │   └── error.rs         # AppError → HTTP response mapping
 ├── cpp_bridge/
 │   ├── deck_recommend_c.h    # C API header

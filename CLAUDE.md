@@ -46,19 +46,21 @@ The C++ static library is built by `build.zig` for Zig-backed targets. Cargo use
 - **Reader** (`checkout`): acquires one engine slot for a single recommend call. Multiple readers run concurrently.
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers.
 
-Userdata is cached server-side: clients call `/cache_userdata` first, then reference the returned hash in subsequent `/recommend` calls. Each engine slot tracks which userdata hashes it has loaded to avoid redundant FFI calls.
+Userdata is cached server-side: clients call `/cache_userdata` first, then reference the returned hash in subsequent `/recommend` calls. Each engine slot tracks which userdata hashes it has loaded to avoid redundant FFI calls. `UserdataCache` (`src/userdata_cache.rs`) is an LRU bounded by entries, bytes and idle TTL whose entries are tagged with the regions that used them; exclusive region updates go through `invalidate_userdata` (`UserdataInvalidation::Region`), which drops that region's and never-used entries and prunes only those hashes from the engine slots.
 
 ## Key Environment Variables
 
-- `DECK_DATA_DIR` -- path to C++ engine static data (required at runtime)
+- `DECK_DATA_DIR` -- path to C++ engine static data (required at runtime; read-only)
+- `DECK_RL_SEED_CACHE_FILE` / `DECK_RL_SEED_CACHE_DISABLE` -- engine RL seed cache file (unset -> `$DECK_DATA_DIR/rl_seed_cache.tsv`; image sets `/cache/rl_seed_cache.tsv`) and literal `1` kill switch; `main.rs` probes writability at startup and logs enabled/disabled/not-writable
 - `DECK_REGISTRY_URL` -- master registry base URL; when set, `DECK_REGISTRY_REGIONS` (default all five) are pulled from the registry (`registry.rs`: manifest → 37 engine keys by blob digest → `update_masterdata_from_json`, plus music metas) and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` / `_FETCH_CONCURRENCY` / `_TIMEOUT_MS` tune it. `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
-- `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` -- masterdata directory for preloading on startup
-- `DECK_MASTERDATA_REGIONS` -- CSV of regions to preload (default: jp,en,cn,tw,kr)
+- `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` -- legacy (deprecated) masterdata directory for preloading on startup; `POST /update/masterdata` (base_dir) is deprecated in favour of `POST /update/masterdata/registry`
+- `DECK_MASTERDATA_REGIONS` -- legacy: CSV of regions to preload from the directory (default: jp,en,cn,tw,kr)
 - `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` -- music metas directory for preloading on startup
 - `DECK_MUSICMETAS_REGIONS` -- CSV of music metas regions to preload (default: jp,en,cn,tw,kr)
 - `DECK_MUSICMETAS_FILE_<REGION>` -- explicit music metas file for one region
-- `DECK_MASTERDATA_REFRESH_MS` -- masterdata refresh watcher interval (default: 300000)
+- `DECK_MASTERDATA_REFRESH_MS` -- legacy: masterdata directory refresh watcher interval (default: 300000)
 - `DECK_ENGINE_POOL_SIZE` -- number of engine instances
+- `DECK_USERDATA_CACHE_MAX_ENTRIES` / `DECK_USERDATA_CACHE_MAX_BYTES` / `DECK_USERDATA_CACHE_TTL_SECONDS` -- userdata payload cache bounds (defaults: 128 / 256 MiB / 1800 s)
 - `DECK_ENGINE_THREADS` -- C++ engine-internal thread count (default: 1); keep `pool size x engine threads` within the CPU count
 - `DECK_RECOMMEND_TIMEOUT_MS` -- default timeout injected when requests omit `timeout_ms`
 - `DECK_LOCK_WARN_MS` / `DECK_LOCK_TIMEOUT_MS` / `DECK_ENGINE_WARN_MS` -- pool wait warn threshold, pool acquire timeout, engine op warn threshold

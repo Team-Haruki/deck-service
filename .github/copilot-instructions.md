@@ -18,7 +18,7 @@ Upstream now ships Python bindings and a WebAssembly/npm package target. deck-se
 - C++ source resolved from: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - Clone source with submodules, e.g. `git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src`
 - Cross-compile: `cargo zigbuild --target x86_64-unknown-linux-musl`
-- Docker: multi-stage build → `scratch` image (static musl binary)
+- Docker: multi-stage build → `scratch` image (static musl binary); `/data` read-only static data, `/cache` (uid 65532) holds the RL seed cache via `DECK_RL_SEED_CACHE_FILE`
 
 ## Architecture
 
@@ -33,14 +33,14 @@ FFI boundary uses JSON strings. `DeckRecommend` handle is `Send` (not `Sync`), c
 - `EnginePool` manages N engine instances (default: `min(cpu_count, 4)`)
 - `checkout`: acquires one slot for recommend calls (concurrent readers)
 - `checkout_all`: exclusive access for broadcast updates (masterdata/musicmetas)
-- `UserdataCache` holds userdata payloads; each engine slot tracks loaded hashes to skip redundant FFI calls
+- `UserdataCache` holds userdata payloads (LRU bounded by `DECK_USERDATA_CACHE_MAX_ENTRIES`/`_MAX_BYTES`/`_TTL_SECONDS`, entries tagged by the regions that used them); each engine slot tracks loaded hashes to skip redundant FFI calls; exclusive updates invalidate through `invalidate_userdata` with `UserdataInvalidation::Region`
 
 ## Key Files
 
 - `models.rs` — request/response types (mirrors upstream Python API)
 - `state.rs` — `AppState`, `EnginePool`, `UserdataCache`
 - `masterdata.rs` — region-aware masterdata directory resolution
-- `cpp_bridge/deck_recommend_c.cpp` — C bridge using nlohmann/json
+- `cpp_bridge/deck_recommend_c.cpp` — C bridge using yyjson
 - `build.zig` — compiles C++ sources and C bridge into the static archive for Zig-backed targets
 - `build.rs` — Cargo glue for path resolution and link metadata
 

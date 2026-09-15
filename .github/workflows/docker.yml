@@ -9,14 +9,16 @@ on:
     branches: [main]
     paths:
       - 'Dockerfile'
+      - 'Dockerfile.runtime'
       - '.dockerignore'
       - '.github/workflows/docker.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'go.mod'
-      - 'go.sum'
+      - 'build.rs'
+      - 'build.zig'
+      - 'cpp_sources.txt'
+      - 'cpp_bridge/**'
       - 'src/**'
-      - 'cmd/**'
   workflow_dispatch:
 
 permissions:

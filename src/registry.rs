@@ -14,7 +14,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::error::AppError;
-use crate::state::AppState;
+use crate::masterdata_audit::audit_masterdata;
+use crate::state::{AppState, UserdataInvalidation, invalidate_userdata};
 
 /// Keys the C++ engine reads (`sekai-deck-recommend-cpp`
 /// `src/data-provider/master-data.cpp`). A missing required key aborts the
@@ -159,6 +160,10 @@ pub struct RegionMasterState {
     pub music_metas_digest: Option<String>,
     #[serde(skip)]
     pub music_metas_etag: Option<String>,
+    /// E10: optional engine keys the loaded manifest lacked (sorted); the
+    /// engine treats them as empty tables.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_optional_keys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -168,6 +173,7 @@ pub enum RegistryError {
     Status { url: String, status: u16 },
     Decode(String),
     MissingRequired(Vec<String>),
+    EmptyKeyTables(Vec<String>),
     Engine(String),
     Timeout(String),
 }
@@ -186,6 +192,11 @@ impl std::fmt::Display for RegistryError {
                 "registry manifest lacks required master data: {}",
                 keys.join(",")
             ),
+            RegistryError::EmptyKeyTables(tables) => write!(
+                f,
+                "registry master data has empty key tables: {}",
+                tables.join(",")
+            ),
             RegistryError::Engine(msg) => write!(f, "engine rejected master data: {msg}"),
             RegistryError::Timeout(msg) => write!(f, "{msg}"),
         }
@@ -199,9 +210,9 @@ impl From<RegistryError> for AppError {
             RegistryError::Http(_) | RegistryError::Status { .. } => {
                 AppError::Upstream(err.to_string())
             }
-            RegistryError::Decode(_) | RegistryError::MissingRequired(_) => {
-                AppError::Upstream(err.to_string())
-            }
+            RegistryError::Decode(_)
+            | RegistryError::MissingRequired(_)
+            | RegistryError::EmptyKeyTables(_) => AppError::Upstream(err.to_string()),
             RegistryError::Engine(msg) => AppError::Engine(msg),
             RegistryError::Timeout(msg) => AppError::Timeout(msg),
         }
@@ -438,6 +449,27 @@ pub async fn ensure_region(
         "Loading deck-service masterdata from the registry"
     );
     let data = client.fetch_masterdata(&region, &manifest).await?;
+    // C9: refuse data the engine would load but could never recommend from;
+    // the region keeps whatever it had loaded before.
+    let audit = audit_masterdata(&data);
+    debug_assert!(
+        audit.missing_required_keys.is_empty(),
+        "fetch_masterdata already rejects missing required keys"
+    );
+    if !audit.empty_key_tables.is_empty() {
+        return Err(RegistryError::EmptyKeyTables(audit.empty_key_tables));
+    }
+    // E10: never strict-fail on optional keys, only warn and record them.
+    if !audit.missing_optional_keys.is_empty() {
+        tracing::warn!(
+            region = %region,
+            reason,
+            content_hash = %manifest.content_hash,
+            missing_optional_count = audit.missing_optional_keys.len(),
+            missing_optional = %audit.missing_optional_keys.join(","),
+            "Registry manifest lacks optional master data keys; the engine treats them as empty"
+        );
+    }
     let metas = client.fetch_music_metas(&region, None).await?;
     let (metas_body, metas_etag) = match metas {
         Fetched::Body { bytes, etag } => (Some(bytes), etag),
@@ -471,6 +503,7 @@ pub async fn ensure_region(
         source: "registry",
         music_metas_digest: metas_text.as_deref().map(digest_hex),
         music_metas_etag: metas_etag,
+        missing_optional_keys: audit.missing_optional_keys,
     };
     state
         .masterdata_state
@@ -535,7 +568,8 @@ async fn refresh_music_metas(
 
 /// Same shape as the handlers' exclusive path: master data lives in the
 /// engine's shared region store, so one engine applies it for the pool;
-/// cached userdata is then invalid for every slot.
+/// cached userdata tagged with this region (or never used) is then dropped
+/// from the cache and every slot.
 fn apply_exclusive<F>(state: &AppState, region: &str, f: F) -> Result<(), RegistryError>
 where
     F: FnOnce(&crate::bridge::DeckRecommend) -> Result<(), String>,
@@ -549,9 +583,16 @@ where
         .next()
         .ok_or_else(|| RegistryError::Engine("engine pool is empty".into()))?;
     f(engine).map_err(RegistryError::Engine)?;
-    engines.clear_userdata_hashes();
-    state.userdata_cache.clear();
-    tracing::debug!(region = %region, "Cleared cached userdata after registry update");
+    let evicted = invalidate_userdata(
+        &state.userdata_cache,
+        &mut engines,
+        UserdataInvalidation::Region(region),
+    );
+    tracing::debug!(
+        region = %region,
+        evicted_userdata = evicted,
+        "Invalidated cached userdata after registry update"
+    );
     Ok(())
 }
 
@@ -637,6 +678,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::DeckRecommend;
+    use crate::masterdata_audit::KEY_MASTERDATA_TABLES;
     use crate::state::{DebugConfig, EnginePool, UserdataCache};
 
     const MUSIC_METAS_V1: &str = r#"[{"music_id":1,"difficulty":"master","music_time":120.0}]"#;
@@ -712,15 +754,36 @@ mod tests {
     }
 
     fn publish(registry: &Shared, region: &str, keys: &[&str], version: &str) -> String {
+        publish_with(registry, region, keys, version, default_body)
+    }
+
+    /// Key tables get one empty row so the non-empty check passes; every other
+    /// table stays `[]`.
+    fn default_body(key: &str) -> &'static str {
+        if KEY_MASTERDATA_TABLES.contains(&key) {
+            "[{}]"
+        } else {
+            "[]"
+        }
+    }
+
+    fn publish_with(
+        registry: &Shared,
+        region: &str,
+        keys: &[&str],
+        version: &str,
+        body_for: impl Fn(&str) -> &'static str,
+    ) -> String {
         let mut fake = registry.lock();
         let mut files = Vec::new();
         for key in keys {
-            let body = "[]".to_string();
+            let body = body_for(key).to_string();
             let digest = sha(&format!("{version}:{key}:{body}"));
+            let size = body.len() as u64;
             fake.blobs.insert(digest.clone(), body);
             files.push(ManifestFile {
                 name: format!("{key}.json"),
-                size: 2,
+                size,
                 sha256: digest,
             });
         }
@@ -871,6 +934,9 @@ mod tests {
             Some(digest_hex(MUSIC_METAS_V1).as_str())
         );
         assert!(outcome.state.loaded_at > 0);
+        assert!(outcome.state.missing_optional_keys.is_empty());
+        let text = sonic_rs::to_string(&outcome.state).unwrap();
+        assert!(!text.contains("missingOptionalKeys"), "{text}");
         assert_eq!(counts(&registry), (1, 37, 1));
         assert!(state.masterdata_state.lock().contains_key("jp"));
 
@@ -898,6 +964,18 @@ mod tests {
         );
         assert_eq!(counts(&registry), (3, 37, 3));
 
+        // E7: seed userdata tagged cn, tagged jp, and never used.
+        state.userdata_cache.remember("h-cn", "{}").unwrap();
+        assert!(state.userdata_cache.get("h-cn", Some("cn")).is_some());
+        state.userdata_cache.remember("h-jp", "{}").unwrap();
+        assert!(state.userdata_cache.get("h-jp", Some("jp")).is_some());
+        state.userdata_cache.remember("h-none", "{}").unwrap();
+        {
+            let mut lease = state.engines.checkout(Duration::from_secs(1)).unwrap();
+            lease.remember_userdata_hash("h-cn");
+            lease.remember_userdata_hash("h-jp");
+        }
+
         // New manifest without an optional key: reload, 36 blobs.
         let mut keys = all_keys();
         keys.retain(|key| *key != "ingameNotes");
@@ -906,6 +984,45 @@ mod tests {
         assert!(outcome.reloaded);
         assert_eq!(outcome.state.content_hash, hash_v2);
         assert_eq!(counts(&registry), (4, 37 + 36, 4));
+        assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
+
+        // E7: the jp reload evicts jp-tagged and untagged userdata, keeps cn,
+        // and prunes only the evicted hashes from the engine slot.
+        assert!(state.userdata_cache.get("h-cn", None).is_some());
+        assert!(state.userdata_cache.get("h-jp", None).is_none());
+        assert!(state.userdata_cache.get("h-none", None).is_none());
+        {
+            // Pool size 1: the same slot comes back.
+            let lease = state.engines.checkout(Duration::from_secs(1)).unwrap();
+            assert!(lease.has_userdata_hash("h-cn"));
+            assert!(!lease.has_userdata_hash("h-jp"));
+        }
+        let text = sonic_rs::to_string(&outcome.state).unwrap();
+        assert!(
+            text.contains("\"missingOptionalKeys\":[\"ingameNotes\"]"),
+            "{text}"
+        );
+
+        // E10: a music-metas-only refresh keeps the recorded list, and
+        // /state/masterdata reports it.
+        publish_metas(&registry, "jp", MUSIC_METAS_V1);
+        let outcome = ensure_region(&state, "jp", None, "refresh").await.unwrap();
+        assert!(!outcome.reloaded);
+        assert_eq!(
+            outcome.state.music_metas_digest.as_deref(),
+            Some(digest_hex(MUSIC_METAS_V1).as_str())
+        );
+        assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
+        let axum::Json(snapshot) = crate::handlers::masterdata_state(State(state.clone())).await;
+        assert_eq!(
+            snapshot.regions["jp"].missing_optional_keys,
+            ["ingameNotes"]
+        );
+        let text = sonic_rs::to_string(&snapshot).unwrap();
+        assert!(
+            text.contains("\"missingOptionalKeys\":[\"ingameNotes\"]"),
+            "{text}"
+        );
 
         // A manifest missing a required key is rejected and nothing changes.
         let mut broken = all_keys();
@@ -923,11 +1040,75 @@ mod tests {
         let app_err: AppError = err.into();
         assert!(matches!(app_err, AppError::Upstream(_)));
 
+        // A manifest whose key table is empty is fetched, then rejected (C9).
+        let before = counts(&registry);
+        publish_with(&registry, "jp", &all_keys(), "1.0.3", |key| {
+            if key == "cards" {
+                "[]"
+            } else {
+                default_body(key)
+            }
+        });
+        let err = ensure_region(&state, "jp", None, "refresh")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::EmptyKeyTables(ref keys) if keys == &["cards"]));
+        assert!(err.to_string().contains("empty key tables: cards"), "{err}");
+        assert_eq!(
+            state.masterdata_state.lock()["jp"].content_hash,
+            hash_v2,
+            "rejected load must keep the previous state"
+        );
+        assert_eq!(counts(&registry).1, before.1 + 37, "check runs after fetch");
+        assert!(matches!(AppError::from(err), AppError::Upstream(_)));
+
         // Regions the registry does not have surface as upstream errors.
         let err = ensure_region(&state, "en", None, "refresh")
             .await
             .unwrap_err();
         assert!(matches!(err, RegistryError::Status { status: 404, .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn push_rejects_empty_key_tables_and_missing_required() {
+        use crate::handlers::update_masterdata_from_json;
+        use crate::models::UpdateMasterdataFromJsonRequest;
+
+        let state = app_state(None);
+        let body = |body_for: &dyn Fn(&str) -> &'static str, keys: &[&str]| {
+            axum::Json(UpdateMasterdataFromJsonRequest {
+                data: keys
+                    .iter()
+                    .map(|key| (format!("{key}.json"), body_for(key).to_owned()))
+                    .collect(),
+                region: "jp".into(),
+            })
+        };
+
+        let err = update_masterdata_from_json(State(state.clone()), body(&|_| "[]", &all_keys()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::BadRequest(ref msg) if msg.starts_with("masterdata key tables are empty: ") && msg.contains("cards")),
+            "{err}"
+        );
+
+        let mut no_musics = all_keys();
+        no_musics.retain(|key| *key != "musics");
+        let err =
+            update_masterdata_from_json(State(state.clone()), body(&default_body, &no_musics))
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(err, AppError::BadRequest(ref msg) if msg == "masterdata lacks required keys: musics"),
+            "{err}"
+        );
+
+        let axum::Json(ok) =
+            update_masterdata_from_json(State(state), body(&default_body, &all_keys()))
+                .await
+                .unwrap();
+        assert_eq!(ok, sonic_rs::json!({ "status": "ok" }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -983,6 +1164,7 @@ mod tests {
         assert!(text.contains("\"source\":\"registry\""), "{text}");
         assert!(text.contains("\"musicMetasDigest\""), "{text}");
         assert!(!text.contains("music_metas_etag"), "{text}");
+        assert!(!text.contains("missingOptionalKeys"), "{text}");
 
         let err = update_masterdata_from_registry(
             State(state),

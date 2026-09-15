@@ -37,7 +37,8 @@ All Rust source files are directly in `src/` — no nested modules:
 | `bridge.rs` | Safe wrapper around FFI (owns the C++ handle, implements `Drop`) |
 | `ffi.rs` | Raw `unsafe extern "C"` declarations + helper functions |
 | `state.rs` | `AppState`, `EnginePool` (reader/writer concurrency), `UserdataCache` |
-| `masterdata.rs` | Masterdata directory resolution with region-aware candidate search |
+| `masterdata.rs` | Legacy masterdata directory resolution with region-aware candidate search (the directory path and `POST /update/masterdata` are deprecated) |
+| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the 37-key lock tests |
 | `registry.rs` | Master registry client: frozen 37-key engine list, manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
 | `error.rs` | `AppError` enum with `IntoResponse` impl |
 
@@ -58,6 +59,8 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers; writer-priority prevents starvation.
 
 Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand.
+
+`UserdataCache` (`src/userdata_cache.rs`) is an LRU bounded by `DECK_USERDATA_CACHE_MAX_ENTRIES` (128), `DECK_USERDATA_CACHE_MAX_BYTES` (256 MiB) and an idle `DECK_USERDATA_CACHE_TTL_SECONDS` (1800); each engine slot tracks at most 64 loaded hashes, the C++ `SharedUserdataStore` cap. `/cache_userdata` carries no region, so entries are tagged on use (`get(hash, Some(region))` from recommend, batch recommend and world bloom support cards). Every exclusive update (masterdata/musicmetas handlers, the directory refresh watcher, the registry path) must call `invalidate_userdata(..., UserdataInvalidation::Region(region))` rather than clearing the cache directly: it evicts entries tagged with that region plus untagged entries and prunes exactly those hashes from every engine slot. LRU and idle eviction inside the cache do not prune slot hash sets (no exclusive lease is held); a stale slot hash is harmless because the request fails at `resolve_userdata_payload` first. Lock order is pool, then cache; never take the cache lock and then the pool.
 
 `DECK_ENGINE_THREADS` (default 1, clamped to available parallelism) sets the C++ engine's internal thread count. Keep `pool size × engine threads` within the CPU count; startup logs a warning when oversubscribed.
 
@@ -93,6 +96,9 @@ Batch `/recommend` picks its execution strategy from `DECK_ENGINE_THREADS`:
 - Uses multi-stage build: zig+rust builder → `scratch` final image
 - Output is a static musl binary with zero runtime dependencies
 - No TLS/certificate libraries needed (service is behind a reverse proxy)
+- `/data` is read-only static engine data; `/cache` is owned by uid 65532 and holds the RL seed cache (`ENV DECK_RL_SEED_CACHE_FILE=/cache/rl_seed_cache.tsv`). No `VOLUME` instruction; deployments mount a named volume or a `chown 65532:65532` host dir at `/cache`
+- `Dockerfile.runtime` uses a small alpine prep stage to create `/cache`, since `scratch` has no shell
+- The startup log line `RL seed cache enabled` / not-writable warning / `disabled` is the deploy-time check
 
 ## Adding New Endpoints
 

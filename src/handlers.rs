@@ -5,7 +5,10 @@ use std::time::Instant;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, header::CONTENT_TYPE};
+use axum::http::{
+    HeaderMap, HeaderValue,
+    header::{CONTENT_TYPE, LINK},
+};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -13,6 +16,7 @@ use sonic_rs::{LazyValue, json};
 
 use crate::error::AppError;
 use crate::masterdata::resolve_masterdata_base_dir;
+use crate::masterdata_audit::audit_masterdata;
 use crate::models::{
     BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions, MasterdataStateResponse,
     UpdateMasterdataFromJsonRequest, UpdateMasterdataFromRegistryRequest,
@@ -20,7 +24,25 @@ use crate::models::{
     UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
 use crate::registry::ensure_region;
-use crate::state::{AppState, EngineLease};
+use crate::state::{AppState, EngineLease, UserdataInvalidation, invalidate_userdata};
+
+/// Successor of the deprecated directory endpoint `POST /update/masterdata`.
+const MASTERDATA_REGISTRY_ENDPOINT: &str = "/update/masterdata/registry";
+const DEPRECATION_HEADER: &str = "deprecation";
+
+/// JSON response for a deprecated endpoint: same status and body shape, plus
+/// `Deprecation: true` and `Link: <successor>; rel="successor-version"`.
+fn deprecated_response(body: sonic_rs::Value, successor: &'static str) -> Response {
+    let mut response = Json(body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(DEPRECATION_HEADER, HeaderValue::from_static("true"));
+    headers.insert(
+        LINK,
+        HeaderValue::from_str(&format!("<{successor}>; rel=\"successor-version\""))
+            .expect("static successor path is a valid header value"),
+    );
+    response
+}
 
 pub async fn health() -> &'static str {
     "ok"
@@ -101,7 +123,8 @@ pub async fn world_bloom_support_cards(
     let request_started = Instant::now();
     let options = parse_json_body::<WorldBloomSupportOptions>(&body, "world bloom support cards")?;
     let userdata_hash = normalize_userdata_hash(options.userdata_hash.as_deref());
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref(), &options.region)?;
 
     tracing::info!(
         op_id,
@@ -170,8 +193,14 @@ pub async fn recommend(
 pub async fn update_masterdata(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMasterdataRequest>,
-) -> Result<Json<sonic_rs::Value>, AppError> {
+) -> Result<Response, AppError> {
     let op_id = state.next_op_id();
+    tracing::warn!(
+        op_id,
+        op = "update_masterdata",
+        region = %req.region,
+        "Deprecated endpoint POST /update/masterdata (base_dir) called; use POST /update/masterdata/registry — removed in the release after the registry fetcher ships"
+    );
     let request_started = Instant::now();
     let resolved_base_dir = resolve_masterdata_base_dir(&req.base_dir, &req.region);
     tracing::info!(
@@ -192,9 +221,13 @@ pub async fn update_masterdata(
         );
     }
     tokio::task::block_in_place(|| {
-        run_engine_exclusive_op(state.as_ref(), op_id, "update_masterdata", true, |engine| {
-            engine.update_masterdata(&resolved_base_dir, &req.region)
-        })
+        run_engine_exclusive_op(
+            state.as_ref(),
+            op_id,
+            "update_masterdata",
+            UserdataInvalidation::Region(&req.region),
+            |engine| engine.update_masterdata(&resolved_base_dir, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -202,7 +235,14 @@ pub async fn update_masterdata(
         elapsed_ms = elapsed_ms(request_started.elapsed()),
         "Request completed"
     );
-    Ok(Json(json!({ "status": "ok" })))
+    Ok(deprecated_response(
+        json!({
+            "status": "ok",
+            "deprecated": true,
+            "replacement": MASTERDATA_REGISTRY_ENDPOINT,
+        }),
+        MASTERDATA_REGISTRY_ENDPOINT,
+    ))
 }
 
 pub async fn update_masterdata_from_json(
@@ -218,12 +258,37 @@ pub async fn update_masterdata_from_json(
         file_count = req.data.len(),
         "Request accepted"
     );
+    // C9: reject a caller-supplied body the engine could never recommend from
+    // with a 400 (not a 500), so retrying callers do not re-send it.
+    let audit = audit_masterdata(&req.data);
+    if !audit.missing_required_keys.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "masterdata lacks required keys: {}",
+            audit.missing_required_keys.join(",")
+        )));
+    }
+    if !audit.empty_key_tables.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "masterdata key tables are empty: {}",
+            audit.empty_key_tables.join(",")
+        )));
+    }
+    if !audit.missing_optional_keys.is_empty() {
+        tracing::warn!(
+            op_id,
+            op = "update_masterdata_from_json",
+            region = %req.region,
+            missing_optional_count = audit.missing_optional_keys.len(),
+            missing_optional = %audit.missing_optional_keys.join(","),
+            "Pushed master data lacks optional keys; the engine treats them as empty"
+        );
+    }
     tokio::task::block_in_place(|| {
         run_engine_exclusive_op(
             state.as_ref(),
             op_id,
             "update_masterdata_from_json",
-            true,
+            UserdataInvalidation::Region(&req.region),
             |engine| engine.update_masterdata_from_json(&req.data, &req.region),
         )
     })?;
@@ -305,9 +370,13 @@ pub async fn update_musicmetas(
         "Request accepted"
     );
     tokio::task::block_in_place(|| {
-        run_engine_exclusive_op(state.as_ref(), op_id, "update_musicmetas", true, |engine| {
-            engine.update_musicmetas(&req.file_path, &req.region)
-        })
+        run_engine_exclusive_op(
+            state.as_ref(),
+            op_id,
+            "update_musicmetas",
+            UserdataInvalidation::Region(&req.region),
+            |engine| engine.update_musicmetas(&req.file_path, &req.region),
+        )
     })?;
     tracing::info!(
         op_id,
@@ -336,7 +405,7 @@ pub async fn update_musicmetas_from_string(
             state.as_ref(),
             op_id,
             "update_musicmetas_from_string",
-            true,
+            UserdataInvalidation::Region(&req.region),
             |engine| engine.update_musicmetas_from_string(&req.data, &req.region),
         )
     })?;
@@ -409,7 +478,8 @@ async fn recommend_legacy(
     let meta: RecommendRequestMeta = sonic_rs::from_slice(body.as_ref())
         .map_err(|e| AppError::BadRequest(format!("invalid recommend payload: {e}")))?;
     let userdata_hash = normalize_userdata_hash(meta.userdata_hash.as_deref());
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref())?;
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), userdata_hash.as_deref(), &meta.region)?;
     let default_timeout_ms = state.debug.default_recommend_timeout_ms;
     let timeout_ms = meta.timeout_ms.or(default_timeout_ms).unwrap_or_default();
     tracing::info!(
@@ -484,8 +554,9 @@ async fn recommend_batch(
         .into_iter()
         .map(|option| option.as_raw_str().to_owned())
         .collect::<Vec<_>>();
-    let userdata_payload = resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()))?
-        .expect("batch recommend requires userdata payload");
+    let userdata_payload =
+        resolve_userdata_payload(state.as_ref(), Some(userdata_hash.as_str()), &region)?
+            .expect("batch recommend requires userdata payload");
     let default_timeout_ms = state.debug.default_recommend_timeout_ms;
     let results = if state.debug.engine_thread_count > 1 {
         tokio::task::block_in_place(|| {
@@ -985,11 +1056,12 @@ fn normalize_userdata_hash(userdata_hash: Option<&str>) -> Option<String> {
 fn resolve_userdata_payload(
     state: &AppState,
     userdata_hash: Option<&str>,
+    region: &str,
 ) -> Result<Option<Arc<str>>, AppError> {
     let Some(userdata_hash) = normalize_userdata_hash(userdata_hash) else {
         return Ok(None);
     };
-    match state.userdata_cache.get(&userdata_hash) {
+    match state.userdata_cache.get(&userdata_hash, Some(region)) {
         Some(payload) => Ok(Some(payload)),
         None => Err(AppError::BadRequest(format!(
             "User data not found for userdata_hash: {userdata_hash}; call /cache_userdata first"
@@ -1132,7 +1204,7 @@ fn run_engine_exclusive_op<T, F>(
     state: &AppState,
     op_id: u64,
     op_name: &'static str,
-    clear_userdata_cache_on_success: bool,
+    invalidate: UserdataInvalidation<'_>,
     f: F,
 ) -> Result<T, AppError>
 where
@@ -1178,13 +1250,14 @@ where
         .next()
         .ok_or_else(|| AppError::Engine("engine pool is empty".into()))?;
     let result = f(engine).map_err(AppError::Engine)?;
-    if clear_userdata_cache_on_success {
-        engines.clear_userdata_hashes();
-        state.userdata_cache.clear();
+    if !matches!(invalidate, UserdataInvalidation::None) {
+        let evicted = invalidate_userdata(&state.userdata_cache, &mut engines, invalidate);
         tracing::info!(
             op_id,
             op = op_name,
-            "Cleared cached userdata state after exclusive engine update"
+            invalidation = ?invalidate,
+            evicted_userdata = evicted,
+            "Invalidated cached userdata state after exclusive engine update"
         );
     }
     let engine_elapsed = engine_started.elapsed();
@@ -1222,7 +1295,48 @@ pub async fn userdata_cache_stats(
 mod tests {
     use std::time::Duration;
 
-    use super::{batch_recommend_response_json, merge_native_batch_results};
+    use axum::http::StatusCode;
+    use sonic_rs::json;
+
+    use super::{
+        MASTERDATA_REGISTRY_ENDPOINT, batch_recommend_response_json, deprecated_response,
+        merge_native_batch_results,
+    };
+
+    #[tokio::test]
+    async fn deprecated_response_marks_headers_and_body() {
+        let response = deprecated_response(
+            json!({
+                "status": "ok",
+                "deprecated": true,
+                "replacement": MASTERDATA_REGISTRY_ENDPOINT,
+            }),
+            MASTERDATA_REGISTRY_ENDPOINT,
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("deprecation")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("link")
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"</update/masterdata/registry>; rel="successor-version""#)
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("response body should be readable");
+        let body = std::str::from_utf8(&body).expect("response body should be UTF-8");
+        assert!(body.contains(r#""deprecated":true"#));
+        assert!(body.contains(r#""status":"ok""#));
+        assert!(body.contains(r#""replacement":"/update/masterdata/registry""#));
+    }
 
     #[test]
     fn native_batch_results_preserve_item_success_and_error() {

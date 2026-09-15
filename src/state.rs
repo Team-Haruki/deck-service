@@ -55,6 +55,39 @@ struct EnginePoolState {
 
 pub use crate::userdata_cache::UserdataCache;
 
+/// How an exclusive engine update invalidates cached userdata.
+#[derive(Clone, Copy, Debug)]
+pub enum UserdataInvalidation<'a> {
+    None,
+    Region(&'a str),
+    All,
+}
+
+/// Apply `how` to both the Rust payload cache and every engine slot's hash set.
+/// Caller holds the exclusive lease (pool mutex); the cache mutex is taken inside.
+/// Lock order is pool -> cache everywhere; nothing takes cache -> pool (readers
+/// release the pool guard in `checkout` before touching the cache,
+/// `cache_userdata` remembers after its lease is dropped), so this cannot deadlock.
+pub fn invalidate_userdata(
+    cache: &UserdataCache,
+    engines: &mut ExclusiveEngineLease<'_>,
+    how: UserdataInvalidation<'_>,
+) -> usize {
+    match how {
+        UserdataInvalidation::None => 0,
+        UserdataInvalidation::All => {
+            let evicted = cache.clear().len();
+            engines.clear_userdata_hashes();
+            evicted
+        }
+        UserdataInvalidation::Region(region) => {
+            let evicted = cache.clear_region(region);
+            engines.forget_userdata_hashes(&evicted);
+            evicted.len()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum EnginePoolError {
     CheckoutTimeout(Duration),
@@ -249,6 +282,16 @@ impl ExclusiveEngineLease<'_> {
     pub fn clear_userdata_hashes(&mut self) {
         for slot in &mut self.state.available {
             slot.userdata_hashes.clear();
+        }
+    }
+
+    pub fn forget_userdata_hashes(&mut self, hashes: &[String]) {
+        if hashes.is_empty() {
+            return;
+        }
+        for slot in &mut self.state.available {
+            slot.userdata_hashes
+                .retain(|value| !hashes.iter().any(|hash| hash == value));
         }
     }
 }

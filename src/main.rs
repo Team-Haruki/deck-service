@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ use deck_service::bridge::DeckRecommend;
 use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::registry::{self, RegistryClient, RegistryConfig};
-use deck_service::state::{AppState, DebugConfig, EnginePool, UserdataCache};
+use deck_service::state::{
+    AppState, DebugConfig, EnginePool, UserdataCache, UserdataInvalidation, invalidate_userdata,
+};
 
 #[tokio::main]
 async fn main() {
@@ -34,6 +36,7 @@ async fn main() {
 
     tracing::info!("Initializing data path: {data_dir}");
     DeckRecommend::init_data_path(&data_dir).expect("Failed to init data path");
+    log_rl_seed_cache_status();
 
     let lock_warn_threshold = env_duration_ms("DECK_LOCK_WARN_MS", 1_000);
     let lock_timeout = env_duration_ms("DECK_LOCK_TIMEOUT_MS", 30_000);
@@ -125,6 +128,7 @@ async fn main() {
         engine_thread_count,
         available_parallelism,
         default_recommend_timeout_ms = default_recommend_timeout_ms.unwrap_or_default(),
+        userdata_cache_max_entries = state.userdata_cache.stats().max_entries,
         "Initialized deck-service debug thresholds"
     );
 
@@ -219,7 +223,7 @@ fn env_usize_at_least_one(name: &str) -> Option<usize> {
                 tracing::warn!(
                     env_var = name,
                     value = %raw,
-                    "Ignoring non-positive engine pool size"
+                    "Ignoring non-positive value"
                 );
                 None
             }
@@ -228,7 +232,7 @@ fn env_usize_at_least_one(name: &str) -> Option<usize> {
                     env_var = name,
                     value = %raw,
                     error = %err,
-                    "Ignoring invalid engine pool size"
+                    "Ignoring invalid value"
                 );
                 None
             }
@@ -429,12 +433,16 @@ fn update_masterdata_region(
         return None;
     }
 
-    engines.clear_userdata_hashes();
-    state.userdata_cache.clear();
+    let evicted = invalidate_userdata(
+        &state.userdata_cache,
+        &mut engines,
+        UserdataInvalidation::Region(region),
+    );
     tracing::info!(
         region = %region,
         resolved_base_dir = %signature.base_dir,
         engine_count = engines.len(),
+        evicted_userdata = evicted,
         file_count = signature.file_count,
         reason,
         "Updated deck-service masterdata"
@@ -574,9 +582,98 @@ fn env_csv(name: &str, default: &[&str]) -> Vec<String> {
     }
 }
 
+/// Mirrors the engine's RL seed cache path selection (base-deck-recommend.cpp): only the
+/// literal `"1"` disables, no trimming. `None` = the engine will not persist RL seeds.
+fn resolve_rl_seed_cache_path(
+    disable: Option<&str>,
+    file: Option<&str>,
+    data_dir: Option<&str>,
+) -> Option<PathBuf> {
+    if disable == Some("1") {
+        return None;
+    }
+    if let Some(file) = file.filter(|f| !f.is_empty()) {
+        return Some(PathBuf::from(file));
+    }
+    data_dir
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join("rl_seed_cache.tsv"))
+}
+
+/// Opens `<path>.tmp` (the engine's own temp name) for append/create, then removes it.
+/// Parent directories are not created, matching the engine.
+fn probe_rl_seed_cache(path: &Path) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&tmp)?;
+    std::fs::remove_file(&tmp)
+}
+
+fn log_rl_seed_cache_status() {
+    // The engine reads the raw env vars, so the probe does too (not the resolved data dir).
+    let disable = env::var("DECK_RL_SEED_CACHE_DISABLE").ok();
+    let file = env::var("DECK_RL_SEED_CACHE_FILE").ok();
+    let data_dir = env::var("DECK_DATA_DIR").ok();
+    match resolve_rl_seed_cache_path(disable.as_deref(), file.as_deref(), data_dir.as_deref()) {
+        None => {
+            tracing::info!("RL seed cache disabled (DECK_RL_SEED_CACHE_DISABLE=1 or no path)")
+        }
+        Some(path) => match probe_rl_seed_cache(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "RL seed cache enabled"),
+            Err(err) => tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "RL seed cache path is not writable; RL warm start will persist nothing"
+            ),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::effective_engine_thread_count;
+    use std::path::PathBuf;
+
+    use super::{effective_engine_thread_count, probe_rl_seed_cache, resolve_rl_seed_cache_path};
+
+    #[test]
+    fn rl_seed_cache_path_mirrors_engine_precedence() {
+        assert_eq!(
+            resolve_rl_seed_cache_path(Some("1"), Some("/x"), Some("/d")),
+            None
+        );
+        assert_eq!(
+            resolve_rl_seed_cache_path(Some("true"), Some("/x"), Some("/d")),
+            Some(PathBuf::from("/x"))
+        );
+        assert_eq!(
+            resolve_rl_seed_cache_path(Some(" 1"), None, Some("/d")),
+            Some(PathBuf::from("/d/rl_seed_cache.tsv"))
+        );
+        assert_eq!(
+            resolve_rl_seed_cache_path(None, Some(""), Some("/d")),
+            Some(PathBuf::from("/d/rl_seed_cache.tsv"))
+        );
+        assert_eq!(resolve_rl_seed_cache_path(None, None, Some("")), None);
+        assert_eq!(resolve_rl_seed_cache_path(None, None, None), None);
+    }
+
+    #[test]
+    fn rl_seed_cache_probe_reports_writability() {
+        let dir = std::env::temp_dir().join(format!("deck-rl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rl_seed_cache.tsv");
+        assert!(probe_rl_seed_cache(&path).is_ok());
+        assert!(!dir.join("rl_seed_cache.tsv.tmp").exists());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let missing = dir.join("missing").join("rl_seed_cache.tsv");
+        assert!(probe_rl_seed_cache(&missing).is_err());
+    }
 
     #[test]
     fn engine_threads_default_to_serial() {

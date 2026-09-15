@@ -81,7 +81,11 @@ Output: `target/x86_64-unknown-linux-musl/release/deck-service` (~4 MB, statical
 # This is the upstream static data/, not runtime masterdata/music metas.
 export DECK_DATA_DIR=/path/to/_cpp_src/data
 
-# Optional: preload region masterdata at startup
+# Preferred: pull master data (and music metas) from the Haruki master registry.
+# Plain http on the private network; replaces the mounted masterdata volume.
+export DECK_REGISTRY_URL=http://100.76.159.97:9998
+
+# Legacy: preload region masterdata from a mounted directory at startup
 export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
 
 # Optional: poll mounted masterdata for changes (ms, default: 300000; 0 disables)
@@ -346,7 +350,20 @@ Response: JSON array of support cards sorted by support bonus descending:
 ### Update Masterdata (from directory)
 
 ```
-POST /update/masterdata
+POST /update/masterdata/registry
+{ "region": "jp", "content_hash": "<optional: the registry contentHash the caller already knows>" }
+→ { "status": "ok", "region": "jp", "contentHash": "…", "gitCommit": "…", "dataVersion": "…", "reloaded": true|false }
+Pulls the region's current manifest from `DECK_REGISTRY_URL`; a matching
+`content_hash` short-circuits without a round trip, an unchanged manifest only
+re-checks music metas (conditional GET), a changed `contentHash` reloads.
+502 when the registry cannot be reached, 503 when `DECK_REGISTRY_URL` is unset.
+
+GET /state/masterdata
+→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest" } } }
+Only registry-loaded regions are listed; directory-loaded regions have no
+version identity and are omitted.
+
+POST /update/masterdata   (legacy directory path, kept for one release)
 { "base_dir": "/path/to/masterdata", "region": "jp" }
 → { "status": "ok" }
 ```
@@ -380,6 +397,11 @@ POST /update/musicmetas/string
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DECK_DATA_DIR` | (relative to binary) | Path to the C++ engine's static data directory |
+| `DECK_REGISTRY_URL` | unset | Master registry base URL (plain http). When set, the regions in `DECK_REGISTRY_REGIONS` are loaded from `GET /v1/master/{region}/current` + `blob/{sha256}` and `GET /v1/metas/{region}/music_metas.json` instead of the directory variables below, which then only apply to regions not listed there |
+| `DECK_REGISTRY_REGIONS` | `jp,en,cn,tw,kr` | CSV of regions served by the registry |
+| `DECK_REGISTRY_REFRESH_MS` | `300000` | Poll interval for the registry manifest (`0` disables; a reload happens only when `contentHash` changes, music metas use `If-None-Match`) |
+| `DECK_REGISTRY_FETCH_CONCURRENCY` | `8` | Parallel blob downloads per region load |
+| `DECK_REGISTRY_TIMEOUT_MS` | `30000` | Per-request timeout against the registry |
 | `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` | unset | Base directory used to preload region masterdata on startup |
 | `DECK_MASTERDATA_REGIONS` | `jp,en,cn,tw,kr` | CSV list of regions to preload masterdata for |
 | `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` | masterdata base, then `/app/data` | Base directory used to preload region music metas on startup |

@@ -326,6 +326,31 @@ pub struct UpdateMasterdataRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateMasterdataFromRegistryRequest {
+    pub region: String,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMasterdataFromRegistryResponse {
+    pub status: &'static str,
+    pub region: String,
+    pub content_hash: String,
+    pub git_commit: String,
+    pub data_version: String,
+    pub reloaded: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterdataStateResponse {
+    pub registry_url: Option<String>,
+    pub regions: BTreeMap<String, crate::registry::RegionMasterState>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateMasterdataFromJsonRequest {
     pub data: std::collections::HashMap<String, String>,
     pub region: String,

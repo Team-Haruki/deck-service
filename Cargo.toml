@@ -13,6 +13,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ruzstd = "0.9"
 parking_lot = "0.12"
+# Registry client: plain http on the tailnet, so no TLS backend (the runtime
+# image is FROM scratch and carries no CA bundle).
+reqwest = { version = "0.12", default-features = false }
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

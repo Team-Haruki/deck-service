@@ -38,6 +38,7 @@ All Rust source files are directly in `src/` — no nested modules:
 | `ffi.rs` | Raw `unsafe extern "C"` declarations + helper functions |
 | `state.rs` | `AppState`, `EnginePool` (reader/writer concurrency), `UserdataCache` |
 | `masterdata.rs` | Masterdata directory resolution with region-aware candidate search |
+| `registry.rs` | Master registry client: frozen 37-key engine list, manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
 | `error.rs` | `AppError` enum with `IntoResponse` impl |
 
 ## Key Conventions

@@ -4,5 +4,6 @@ pub mod ffi;
 pub mod handlers;
 pub mod masterdata;
 pub mod models;
+pub mod registry;
 pub mod state;
 pub mod userdata_cache;

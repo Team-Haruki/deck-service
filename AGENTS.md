@@ -16,6 +16,41 @@ The current upstream source is [Team-Haruki/sekai-deck-recommend-cpp](https://gi
 - Cross-compilation: `cargo zigbuild --target x86_64-unknown-linux-musl`
 - Upstream package tooling such as CMake, Python/uv, and emsdk is only needed when working in the C++ repository's Python or WebAssembly package targets.
 
+## Build & Run
+
+**Prerequisites:** Rust >= 1.85, Zig >= 0.14, cargo-zigbuild
+
+```bash
+# Clone C++ engine source (gitignored, required for build)
+git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src
+
+# Native build
+cargo build --release
+
+# Cross-compile to a static Linux binary (musl)
+cargo zigbuild --release --target x86_64-unknown-linux-musl
+
+# Run (DECK_DATA_DIR is required)
+DECK_DATA_DIR=./_cpp_src/data cargo run --release
+```
+
+## Environment Variables
+
+- `DECK_DATA_DIR` — path to C++ engine static data (required at runtime)
+- `DECK_REGISTRY_URL` — master registry base URL; when set, `DECK_REGISTRY_REGIONS` (default all five) are pulled from the registry and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` / `_FETCH_CONCURRENCY` / `_TIMEOUT_MS` tune it; `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
+- `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` — masterdata directory for startup preloading
+- `DECK_MASTERDATA_REGIONS` — CSV of regions to preload (default: jp,en,cn,tw,kr)
+- `DECK_MASTERDATA_REFRESH_MS` — masterdata refresh watcher interval (default: 300000)
+- `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` — music metas directory for startup preloading
+- `DECK_MUSICMETAS_REGIONS` — CSV of music metas regions to preload (default: jp,en,cn,tw,kr)
+- `DECK_MUSICMETAS_FILE_<REGION>` — explicit music metas file for one region
+- `DECK_ENGINE_POOL_SIZE` — number of engine instances
+- `DECK_ENGINE_THREADS` — C++ engine-internal thread count (default: 1)
+- `DECK_RECOMMEND_TIMEOUT_MS` — default timeout injected when requests omit `timeout_ms`
+- `DECK_LOCK_WARN_MS` / `DECK_LOCK_TIMEOUT_MS` / `DECK_ENGINE_WARN_MS` — pool wait warn threshold, pool acquire timeout, engine op warn threshold
+- `DECK_CPP_SRC` — override for the C++ source location (see Build System)
+- `BIND_ADDR` — HTTP listen address (default: 0.0.0.0:3000)
+
 ## Architecture
 
 ```
@@ -48,6 +83,7 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Error handling**: Return `Result<_, AppError>` from handlers. `AppError::Engine(String)` for C++ errors, `AppError::BadRequest(String)` for input validation, `AppError::Timeout(String)` for pool timeouts.
 - **FFI safety**: `DeckRecommend` is `Send` but not `Sync`. Concurrent access goes through `EnginePool`.
 - **Optional fields**: All optional request fields use `#[serde(skip_serializing_if = "Option::is_none")]`.
+- **Comments**: Minimal — only where the logic is not self-evident.
 - **Tests**: Unit tests live inline under `#[cfg(test)]` (native batch result merging in `handlers.rs`, env parsing helpers in `main.rs`); run with `cargo test`. The C++ engine itself is tested upstream.
 
 ## Concurrency Model
@@ -57,7 +93,7 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Reader** (`checkout`): acquires one engine slot for a single recommend call. Multiple readers run concurrently.
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers; writer-priority prevents starvation.
 
-Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand.
+Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand. Clients call `/cache_userdata` first and then reference the returned hash in subsequent `/recommend` calls.
 
 `DECK_ENGINE_THREADS` (default 1, clamped to available parallelism) sets the C++ engine's internal thread count. Keep `pool size × engine threads` within the CPU count; startup logs a warning when oversubscribed.
 

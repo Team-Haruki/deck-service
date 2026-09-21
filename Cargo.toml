@@ -16,7 +16,7 @@ parking_lot = "0.12"
 # Registry client: plain http on the tailnet, so no TLS backend (the runtime
 # image is FROM scratch and carries no CA bundle).
 reqwest = { version = "0.12", default-features = false }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [profile.release]
 lto = "thin"

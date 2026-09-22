@@ -162,7 +162,7 @@ The container has three different mounts, each with its own role:
 
 The Docker image uses `scratch` as the base (only the static binary), resulting in a ~4 MB image.
 By default it builds against `Team-Haruki/sekai-deck-recommend-cpp` branch
-`master` at commit `05111fd203202b48efe61ebcbaf926e2b4d4dbb8`;
+`master` at commit `4dd670f53260fe33dddb558e22e98337598a65d8`;
 override `DECK_CPP_REPO`, `DECK_CPP_BRANCH`, or `DECK_CPP_REF` as build args if
 you intentionally need a different engine checkout.
 

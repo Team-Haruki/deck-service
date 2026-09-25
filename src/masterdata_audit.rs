@@ -147,7 +147,7 @@ mod tests {
         "worldBlooms",
         "worldBloomSupportDeckBonuses",
     ];
-    const FROZEN_OPTIONAL: [&str; 12] = [
+    const FROZEN_OPTIONAL: [&str; 13] = [
         "worldBloomSupportDeckUnitEventLimitedBonuses",
         "cardMysekaiCanvasBonuses",
         "eventCardBonusLimits",
@@ -156,6 +156,7 @@ mod tests {
         "eventSkillScoreUpLimits",
         "ingameCombos",
         "ingameNotes",
+        "ingameNoteJudges",
         "mysekaiFixtureGameCharacterGroups",
         "mysekaiFixtureGameCharacterGroupPerformanceBonuses",
         "mysekaiGates",
@@ -244,7 +245,7 @@ mod tests {
             .chain(FROZEN_OPTIONAL.iter())
             .copied()
             .collect();
-        assert_eq!(all.len(), 37);
+        assert_eq!(all.len(), 38);
         let required: HashSet<&str> = FROZEN_REQUIRED.iter().copied().collect();
         let optional: HashSet<&str> = FROZEN_OPTIONAL.iter().copied().collect();
         assert!(required.is_disjoint(&optional));
@@ -269,7 +270,11 @@ mod tests {
         );
         assert_eq!(
             cpp_key_list(&source, "notRequiredMasterDataKeys"),
+            // This extra table is consumed by the service bridge, not the C++ core.
             OPTIONAL_MASTERDATA_KEYS
+                .into_iter()
+                .filter(|key| *key != "ingameNoteJudges")
+                .collect::<Vec<_>>()
         );
     }
 

@@ -541,3 +541,15 @@ The Rust replay cache uses LRU eviction, a byte budget and an idle TTL. Defaults
 Idle entries are removed on access and by a 60-second sweep. Each payload is limited to 32 MiB; compressed protocol decoding is limited to 64 MiB. Cache eviction leaves in-flight `Arc` references valid, so these limits describe retained cache data, not total process RSS. Each engine tracks at most 64 loaded hashes, matching the C++ cache capacity.
 
 `GET /cache/stats` reports counts, estimated bytes, limits and evictions, without payloads or user hashes. An expired or evicted hash returns `User data not found for userdata_hash`; clients must upload the snapshot again before retrying. Haruki Cloud handles this automatically.
+
+
+### Finale AUTO scoring
+
+The bridge also loads optional `ingameNoteJudges` masterdata. During each region's real finale
+events' `[startAt, aggregateAt)` windows, AUTO and challenge AUTO recommendations
+use the `ingameNoteJadgeType: "auto"` score coefficient. Both auto base and skill
+music-meta values are scaled from their ordinary 0.7 baseline in a request-local
+copy. Manual play is unchanged; each region uses its own masterdata and event windows. After the event ends, the
+ordinary values return even if masterdata has not yet refreshed. Missing data
+also retains ordinary scoring. Each boosted result deck carries
+`limited_auto_score_coefficient`, allowing callers to label the actual result.

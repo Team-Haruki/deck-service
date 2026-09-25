@@ -602,7 +602,7 @@ void test_userdata_and_calculation_paths() {
 
     shared_region_data_store().set_masterdata(
         Region::KR,
-        std::make_shared<MasterData>()
+        std::make_shared<MasterData>(), {}
     );
     auto provider_options = parse(
         std::string(R"({"region":"kr","user_data":)") + minimal_userdata() + "}"
@@ -612,7 +612,7 @@ void test_userdata_and_calculation_paths() {
 
     shared_region_data_store().set_masterdata(
         Region::EN,
-        std::make_shared<MasterData>()
+        std::make_shared<MasterData>(), {}
     );
     auto missing_musicmetas = parse(
         std::string(R"({"region":"en","user_data":)") + minimal_userdata() + "}"
@@ -745,7 +745,29 @@ void test_legacy_update_entry_points() {
 
 } // namespace
 
+void test_limited_auto_policy() {
+    AutoScorePolicy policy{1.7999999523162842, {{1000, 2000}, {3000, 4000}}};
+    assert(policy.active_coefficient(true, 999) == 0.7);
+    assert(policy.active_coefficient(true, 1000) == policy.coefficient);
+    assert(policy.active_coefficient(true, 1999) == policy.coefficient);
+    assert(policy.active_coefficient(true, 2000) == 0.7);
+    assert(policy.active_coefficient(false, 1500) == 0.7);
+    assert(policy.active_coefficient(true, 3000) == policy.coefficient);
+    assert(policy.active_coefficient(true, 2500) == 0.7);
+    SharedRegionDataStore regions;
+    regions.set_masterdata(Region::JP, std::make_shared<MasterData>(), policy);
+    regions.set_masterdata(Region::CN, std::make_shared<MasterData>(), {});
+    assert(regions.auto_score_policy(Region::JP).active_coefficient(true, 1500) == policy.coefficient);
+    assert(regions.auto_score_policy(Region::CN).active_coefficient(true, 1500) == 0.7);
+    policy.coefficient = 0.699999988079071;
+    assert(policy.active_coefficient(true, 1500) == 0.7);
+    policy.coefficient = std::numeric_limits<double>::quiet_NaN();
+    assert(policy.active_coefficient(true, 1500) == 0.7);
+    assert(AutoScorePolicy{}.active_coefficient(true, 1500) == 0.7);
+}
+
 int main() {
+    test_limited_auto_policy();
     test_json_helpers();
     test_result_serializers();
     test_live_skill_parser();

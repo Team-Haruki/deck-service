@@ -1,4 +1,5 @@
 #include "deck_recommend_c.h"
+#include "auto_score_policy.h"
 
 #include "deck-recommend/event-deck-recommend.h"
 #include "deck-recommend/challenge-live-deck-recommend.h"
@@ -545,11 +546,19 @@ class SharedRegionDataStore {
     mutable std::shared_mutex mutex_;
     std::map<Region, std::shared_ptr<MasterData>> region_masterdata_;
     std::map<Region, std::shared_ptr<MusicMetas>> region_musicmetas_;
+    std::map<Region, AutoScorePolicy> auto_score_policies_;
 
 public:
-    void set_masterdata(Region region, std::shared_ptr<MasterData> data) {
+    void set_masterdata(Region region, std::shared_ptr<MasterData> data, AutoScorePolicy policy) {
         std::unique_lock lock(mutex_);
         region_masterdata_[region] = std::move(data);
+        auto_score_policies_[region] = policy;
+    }
+
+    AutoScorePolicy auto_score_policy(Region region) const {
+        std::shared_lock lock(mutex_);
+        auto it = auto_score_policies_.find(region);
+        return it == auto_score_policies_.end() ? AutoScorePolicy{} : it->second;
     }
 
     void set_musicmetas(Region region, std::shared_ptr<MusicMetas> data) {
@@ -1434,13 +1443,18 @@ public:
 
     static std::string serialize_recommendation_result(
         const std::vector<RecommendDeck>& decks,
-        double cost_ms
+        double cost_ms,
+        double auto_coefficient = AutoScorePolicy::baseline
     ) {
         MutableJsonDoc out_doc;
         yyjson_mut_val* result_json = json_object(out_doc.get());
         yyjson_mut_val* decks_json = json_array(out_doc.get());
         for (const auto& deck : decks) {
-            json_array_append(decks_json, recommend_deck_to_json(out_doc.get(), deck));
+            auto item = recommend_deck_to_json(out_doc.get(), deck);
+            if (auto_coefficient > AutoScorePolicy::baseline + 0.000001) {
+                json_add(out_doc.get(), item, "limited_auto_score_coefficient", auto_coefficient);
+            }
+            json_array_append(decks_json, item);
         }
         json_add_value(out_doc.get(), result_json, "decks", decks_json);
         json_add(out_doc.get(), result_json, "cost_ms", cost_ms);
@@ -1517,6 +1531,22 @@ public:
         return *character_id;
     }
 
+    static AutoScorePolicy parse_auto_score_policy(const MasterData& md, const json_view& judges) {
+        AutoScorePolicy policy;
+        for (const auto& event : md.events) {
+            if (md.isWorldBloomFinale(event.id) && event.startAt > 0 && event.aggregateAt > event.startAt) {
+                policy.finale_windows.emplace_back(event.startAt, event.aggregateAt);
+            }
+        }
+        for (const auto& judge : judges) {
+            if (judge.value("ingameNoteJadgeType", "") == "auto") {
+                policy.coefficient = judge.value("scoreCoefficient", AutoScorePolicy::baseline);
+                break;
+            }
+        }
+        return policy;
+    }
+
 public:
     void update_masterdata(const std::string& base_dir, const std::string& region_str) {
         if (!REGION_MAP.count(region_str)) {
@@ -1525,7 +1555,14 @@ public:
         auto r = REGION_MAP.at(region_str);
         auto next_masterdata = std::make_shared<MasterData>();
         next_masterdata->loadFromFiles(base_dir);
-        shared_region_data_store().set_masterdata(r, std::move(next_masterdata));
+        AutoScorePolicy policy;
+        try {
+            auto judges = json_doc::parseFile(base_dir + "/ingameNoteJudges.json", "auto judgments");
+            policy = parse_auto_score_policy(*next_masterdata, judges.root());
+        } catch (const JsonFileOpenError&) {
+            // Older snapshots retain the ordinary auto calculation.
+        }
+        shared_region_data_store().set_masterdata(r, std::move(next_masterdata), policy);
     }
 
     void update_masterdata_from_strings(std::map<std::string, std::string>& data, const std::string& region_str) {
@@ -1543,7 +1580,12 @@ public:
         }
         auto next_masterdata = std::make_shared<MasterData>();
         next_masterdata->loadFromStrings(normalized_data);
-        shared_region_data_store().set_masterdata(r, std::move(next_masterdata));
+        AutoScorePolicy policy;
+        if (auto it = normalized_data.find("ingameNoteJudges"); it != normalized_data.end()) {
+            auto judges = json_doc::parse(it->second, "auto judgments");
+            policy = parse_auto_score_policy(*next_masterdata, judges.root());
+        }
+        shared_region_data_store().set_masterdata(r, std::move(next_masterdata), policy);
     }
 
     void update_musicmetas_file(const std::string& file_path, const std::string& region_str) {
@@ -1666,8 +1708,21 @@ public:
         if (!musicmetas) {
             throw std::invalid_argument("Music metas not found for region: " + region_str);
         }
-        DataProvider dp{region, masterdata, userdata, musicmetas};
         LiveContext live = resolve_live_context(opts);
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        auto auto_coefficient = shared_region_data_store().auto_score_policy(region).active_coefficient(
+            Enums::LiveType::isAuto(live.type), now);
+        if (auto_coefficient > AutoScorePolicy::baseline + 0.000001) {
+            // Never mutate shared regional metas: manual and concurrent requests use the originals.
+            musicmetas = std::make_shared<MusicMetas>(*musicmetas);
+            const double ratio = auto_coefficient / AutoScorePolicy::baseline;
+            for (auto& meta : musicmetas->metas) {
+                meta.base_score_auto *= ratio;
+                for (auto& score : meta.skill_score_auto) score *= ratio;
+            }
+        }
+        DataProvider dp{region, masterdata, userdata, musicmetas};
         int event_id = resolve_event_id(opts, dp, live.is_challenge);
         int challenge_character_id = resolve_challenge_character_id(opts, live.is_challenge);
         int world_bloom_character_id = resolve_world_bloom_character_id(opts, dp, event_id);
@@ -1688,7 +1743,7 @@ public:
         double cost_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - search_started
         ).count();
-        return serialize_recommendation_result(result, cost_ms);
+        return serialize_recommendation_result(result, cost_ms, auto_coefficient);
     }
 
     std::string recommend_batch(

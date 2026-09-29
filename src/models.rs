@@ -5,6 +5,17 @@ use sonic_rs::Value;
 
 // ---- Request types ----
 
+/// How area item `multi_unit` effects (JP 7.0.0+) apply. Omitted means `by_deck`,
+/// the client's rule; unknown values are rejected when the request is parsed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiUnitBonusEvaluation {
+    #[default]
+    ByDeck,
+    ForceOn,
+    ForceOff,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CardConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +187,8 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_after_training_state: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_unit_bonus_evaluation: Option<MultiUnitBonusEvaluation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_live_teammate_score_up: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_live_teammate_power: Option<i32>,
@@ -208,6 +221,8 @@ pub struct CalculateOptions {
     pub deck_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_unit_bonus_evaluation: Option<MultiUnitBonusEvaluation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

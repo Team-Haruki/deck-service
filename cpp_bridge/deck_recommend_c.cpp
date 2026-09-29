@@ -535,6 +535,25 @@ static const std::set<std::string> VALID_EVENT_ATTRS = {"mysterious","cool","pur
 static const std::set<std::string> VALID_EVENT_TYPES = {"marathon","cheerful_carnival","world_bloom"};
 static const std::set<std::string> VALID_SKILL_REF_STRATEGIES = {"average","max","min"};
 static const std::set<std::string> VALID_SKILL_ORDER_STRATEGIES = {"average","max","min","specific"};
+static const std::set<std::string> VALID_MULTI_UNIT_BONUS_EVALUATIONS = {"by_deck","force_on","force_off"};
+
+// Area item multi_unit effects (JP 7.0.0+). Absent means by_deck, the client's rule.
+static MultiUnitBonusEvaluation parse_multi_unit_bonus_evaluation(const json_view& opts) {
+    constexpr const char* key = "multi_unit_bonus_evaluation";
+    if (!opts.contains(key) || opts[key].is_null()) {
+        return MultiUnitBonusEvaluation::ByDeck;
+    }
+    if (!opts[key].is_string()) {
+        throw std::invalid_argument("multi_unit_bonus_evaluation must be a string.");
+    }
+    std::string value = opts[key].get<std::string>();
+    if (!VALID_MULTI_UNIT_BONUS_EVALUATIONS.count(value)) {
+        throw std::invalid_argument("Invalid multi unit bonus evaluation: " + value);
+    }
+    if (value == "force_on") return MultiUnitBonusEvaluation::ForceOn;
+    if (value == "force_off") return MultiUnitBonusEvaluation::ForceOff;
+    return MultiUnitBonusEvaluation::ByDeck;
+}
 
 // ---- process-level shared cache for read-only region data ----
 // MasterData and MusicMetas are immutable after load. Sharing one shared_ptr
@@ -779,7 +798,11 @@ public:
         throw std::invalid_argument("Invalid calculate mode: " + mode);
     }
 
-    DeckDetail calculate_fixed_deck_detail(DataProvider& dp, const std::vector<UserCard>& deckCards) {
+    DeckDetail calculate_fixed_deck_detail(
+        DataProvider& dp,
+        const std::vector<UserCard>& deckCards,
+        MultiUnitBonusEvaluation multiUnitEval = MultiUnitBonusEvaluation::ByDeck
+    ) {
         if (deckCards.empty()) {
             throw std::invalid_argument("fixed deck contains no cards.");
         }
@@ -790,7 +813,18 @@ public:
         DeckCalculator deckCalculator(dp);
         std::unordered_map<int, CardConfig> config{};
         std::unordered_map<int, CardConfig> singleCardConfig{};
-        auto cardDetails = cardCalculator.batchGetCardDetail(deckCards, config, singleCardConfig);
+        auto cardDetails = cardCalculator.batchGetCardDetail(
+            deckCards,
+            config,
+            singleCardConfig,
+            std::nullopt,
+            {},
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            multiUnitEval
+        );
         if (cardDetails.size() != deckCards.size()) {
             throw std::runtime_error("Failed to calculate all cards in fixed deck.");
         }
@@ -810,7 +844,8 @@ public:
             std::nullopt,
             SkillReferenceChooseStrategy::Max,
             false,
-            false
+            false,
+            multiUnitEval
         );
         if (deckDetails.empty()) {
             throw std::runtime_error("Failed to calculate fixed deck detail.");
@@ -1399,6 +1434,7 @@ public:
         apply_skill_strategy_options(config, opts);
         config.keepAfterTrainingState = json_opt<bool>(opts, "keep_after_training_state")
             .value_or(false);
+        config.multiUnitBonusEvaluation = parse_multi_unit_bonus_evaluation(opts);
         apply_multi_live_options(config, opts, live.type);
         config.bestSkillAsLeader = json_opt<bool>(opts, "best_skill_as_leader").value_or(true);
         apply_timeout_option(config, opts, default_timeout_ms);
@@ -1632,9 +1668,10 @@ public:
 
     std::string calculate(const json_view& opts) {
         auto mode = require_string_field(opts, "mode");
+        auto multiUnitEval = parse_multi_unit_bonus_evaluation(opts);
         auto dp = build_data_provider(opts, mode == "live_full");
         auto deckCards = resolve_fixed_deck_cards(dp, opts, mode);
-        auto deckDetail = calculate_fixed_deck_detail(dp, deckCards);
+        auto deckDetail = calculate_fixed_deck_detail(dp, deckCards, multiUnitEval);
 
         MutableJsonDoc out_doc;
         yyjson_mut_val* result = json_object(out_doc.get());

@@ -228,6 +228,7 @@ Content-Type: application/json
 | `custom_bonus_character_support_units` | `object` | Optional virtual singer support-unit constraints keyed by character ID |
 | `skill_reference_choose_strategy` | `string` | Skill reference strategy passed through to the engine |
 | `keep_after_training_state` | `bool` | Keep cards' existing after-training state |
+| `multi_unit_bonus_evaluation` | `string` | How area item `multi_unit` effects (JP 7.0.0+) apply: `"by_deck"` (default, the client's rule), `"force_on"`, `"force_off"`; also accepted by `/calculate` |
 | `multi_live_teammate_score_up` | `int` | Multi-live teammate score-up value |
 | `multi_live_teammate_power` | `int` | Multi-live teammate power value |
 | `best_skill_as_leader` | `bool` | Prefer best skill as leader |

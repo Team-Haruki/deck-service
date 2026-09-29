@@ -100,6 +100,7 @@ fn base_options(userdata_hash: &str) -> Value {
         "skill_order_choose_strategy": "specific",
         "specific_skill_order": [1, 2, 3, 4, 5],
         "keep_after_training_state": true,
+        "multi_unit_bonus_evaluation": "force_on",
         "multi_live_teammate_score_up": 100,
         "multi_live_teammate_power": 200000,
         "multi_live_score_up_lower_bound": 10.5,
@@ -406,6 +407,16 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
             json!("bad"),
             "Invalid skill order strategy",
         ),
+        (
+            "multi_unit_bonus_evaluation",
+            json!("sometimes"),
+            "Invalid multi unit bonus evaluation",
+        ),
+        (
+            "multi_unit_bonus_evaluation",
+            json!(1),
+            "multi_unit_bonus_evaluation must be a string",
+        ),
     ] {
         expect_recommend_error(&second_engine, changed(base.clone(), key, value), expected);
     }
@@ -521,6 +532,21 @@ fn bridge_validates_recommendation_options_and_shared_caches() {
             )
             .unwrap_err()
             .contains("Invalid calculate mode")
+    );
+    assert!(
+        second_engine
+            .calculate_raw(
+                &sonic_rs::to_string(&json!({
+                    "region": "jp",
+                    "userdata_hash": active_hash,
+                    "mode": "deck",
+                    "deck_id": 1,
+                    "multi_unit_bonus_evaluation": "sometimes"
+                }))
+                .unwrap()
+            )
+            .unwrap_err()
+            .contains("Invalid multi unit bonus evaluation")
     );
     let support = second_engine
         .get_world_bloom_support_cards_raw(

@@ -271,6 +271,33 @@ void test_configuration_helpers() {
     assert(config.fixedCards == std::vector<int>{10});
     assert(config.forcedLeaderCharacterId == 3);
 
+    assert(parse_multi_unit_bonus_evaluation(options) == MultiUnitBonusEvaluation::ByDeck);
+    auto null_evaluation = parse(R"({"multi_unit_bonus_evaluation":null})");
+    assert(
+        parse_multi_unit_bonus_evaluation(null_evaluation.root())
+        == MultiUnitBonusEvaluation::ByDeck
+    );
+    for (const auto& [name, expected] : {
+        std::pair{"by_deck", MultiUnitBonusEvaluation::ByDeck},
+        std::pair{"force_on", MultiUnitBonusEvaluation::ForceOn},
+        std::pair{"force_off", MultiUnitBonusEvaluation::ForceOff},
+    }) {
+        auto evaluation = parse(
+            std::string(R"({"multi_unit_bonus_evaluation":")") + name + "\"}"
+        );
+        assert(parse_multi_unit_bonus_evaluation(evaluation.root()) == expected);
+    }
+    auto invalid_evaluation = parse(R"({"multi_unit_bonus_evaluation":"sometimes"})");
+    expect_error(
+        [&] { parse_multi_unit_bonus_evaluation(invalid_evaluation.root()); },
+        "Invalid multi unit bonus evaluation"
+    );
+    auto non_string_evaluation = parse(R"({"multi_unit_bonus_evaluation":1})");
+    expect_error(
+        [&] { parse_multi_unit_bonus_evaluation(non_string_evaluation.root()); },
+        "must be a string"
+    );
+
     auto score = parse(R"({"target":"score"})");
     SekaiDeckRecommendC::apply_target_options(config, score.root(), false);
     assert(config.target == RecommendTarget::Score);

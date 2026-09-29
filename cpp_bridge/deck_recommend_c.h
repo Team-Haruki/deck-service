@@ -67,6 +67,8 @@ const char* deck_recommend_attach_cached_userdata_n(
 );
 
 // Run deck recommendation. options_json is the full options as a JSON string.
+// Optional "multi_unit_bonus_evaluation" ("by_deck" default, "force_on", "force_off")
+// selects how area item multi_unit effects apply; it is also accepted by calculate.
 // Returns a JSON string with the result (caller must free), or NULL on failure.
 // If error occurs, *error_out is set to an error message (caller must free).
 const char* deck_recommend_recommend(DeckRecommendHandle handle, const char* options_json, const char** error_out);
@@ -137,7 +139,8 @@ const char* deck_recommend_recommend_batch_with_context_n(
 );
 
 // Run fixed-deck calculations. options_json is the full options as a JSON string.
-// Supported modes: "deck", "challenge", "live_full".
+// Supported modes: "deck", "challenge", "live_full". Accepts the optional
+// "multi_unit_bonus_evaluation" described above.
 // Returns a JSON string with the result (caller must free), or NULL on failure.
 // If error occurs, *error_out is set to an error message (caller must free).
 const char* deck_recommend_calculate(DeckRecommendHandle handle, const char* options_json, const char** error_out);

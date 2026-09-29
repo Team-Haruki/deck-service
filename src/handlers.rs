@@ -19,7 +19,7 @@ use crate::masterdata::resolve_masterdata_base_dir;
 use crate::masterdata_audit::audit_masterdata;
 use crate::models::{
     BatchRecommendResponseItem, CacheUserdataResponse, CalculateOptions, MasterdataStateResponse,
-    UpdateMasterdataFromJsonRequest, UpdateMasterdataFromRegistryRequest,
+    MultiUnitBonusEvaluation, UpdateMasterdataFromJsonRequest, UpdateMasterdataFromRegistryRequest,
     UpdateMasterdataFromRegistryResponse, UpdateMasterdataRequest,
     UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
@@ -440,6 +440,9 @@ struct RecommendRequestMeta {
     target: Option<String>,
     #[serde(default)]
     timeout_ms: Option<i32>,
+    // Parsed to reject unknown values with 400; the raw JSON reaches the engine.
+    #[serde(default)]
+    multi_unit_bonus_evaluation: Option<MultiUnitBonusEvaluation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +494,7 @@ async fn recommend_legacy(
         music_diff = %meta.music_diff,
         algorithm = meta.algorithm.as_deref().unwrap_or(""),
         target = meta.target.as_deref().unwrap_or(""),
+        multi_unit_bonus_evaluation = ?meta.multi_unit_bonus_evaluation.unwrap_or_default(),
         timeout_ms,
         "Legacy recommend request parsed"
     );
@@ -709,6 +713,7 @@ async fn calculate_with_options(
         difficulty = options.difficulty.as_deref().unwrap_or(""),
         deck_id = options.deck_id.unwrap_or_default(),
         character_id = options.character_id.unwrap_or_default(),
+        multi_unit_bonus_evaluation = ?options.multi_unit_bonus_evaluation.unwrap_or_default(),
         "Calculation request parsed"
     );
 
@@ -1298,10 +1303,14 @@ mod tests {
     use axum::http::StatusCode;
     use sonic_rs::json;
 
+    use axum::body::Bytes;
+
     use super::{
-        MASTERDATA_REGISTRY_ENDPOINT, batch_recommend_response_json, deprecated_response,
-        merge_native_batch_results,
+        MASTERDATA_REGISTRY_ENDPOINT, RecommendRequestMeta, batch_recommend_response_json,
+        deprecated_response, merge_native_batch_results, parse_json_body,
     };
+    use crate::error::AppError;
+    use crate::models::{CalculateOptions, MultiUnitBonusEvaluation};
 
     #[tokio::test]
     async fn deprecated_response_marks_headers_and_body() {
@@ -1370,5 +1379,63 @@ mod tests {
                 .to_string()
                 .contains("returned 0 items for 1 requests")
         );
+    }
+
+    #[test]
+    fn multi_unit_bonus_evaluation_is_optional_and_validated() {
+        let recommend = |extra: &str| {
+            sonic_rs::from_str::<RecommendRequestMeta>(&format!(
+                r#"{{"region":"jp","live_type":"multi","music_id":1,"music_diff":"expert"{extra}}}"#
+            ))
+        };
+        assert_eq!(recommend("").unwrap().multi_unit_bonus_evaluation, None);
+        assert_eq!(
+            recommend(r#","multi_unit_bonus_evaluation":null"#)
+                .unwrap()
+                .multi_unit_bonus_evaluation,
+            None
+        );
+        for (value, expected) in [
+            ("by_deck", MultiUnitBonusEvaluation::ByDeck),
+            ("force_on", MultiUnitBonusEvaluation::ForceOn),
+            ("force_off", MultiUnitBonusEvaluation::ForceOff),
+        ] {
+            let meta = recommend(&format!(r#","multi_unit_bonus_evaluation":"{value}""#)).unwrap();
+            assert_eq!(meta.multi_unit_bonus_evaluation, Some(expected));
+        }
+        assert!(recommend(r#","multi_unit_bonus_evaluation":"sometimes""#).is_err());
+        assert_eq!(
+            MultiUnitBonusEvaluation::default(),
+            MultiUnitBonusEvaluation::ByDeck
+        );
+
+        let calculate = parse_json_body::<CalculateOptions>(
+            &Bytes::from_static(
+                br#"{"mode":"deck","region":"jp","user_data_str":"{}","multi_unit_bonus_evaluation":"force_off"}"#,
+            ),
+            "calculate",
+        )
+        .unwrap();
+        assert_eq!(
+            sonic_rs::to_string(&calculate).unwrap(),
+            r#"{"mode":"deck","region":"jp","user_data_str":"{}","multi_unit_bonus_evaluation":"force_off"}"#
+        );
+        let omitted = parse_json_body::<CalculateOptions>(
+            &Bytes::from_static(br#"{"mode":"deck","region":"jp","user_data_str":"{}"}"#),
+            "calculate",
+        )
+        .unwrap();
+        assert!(
+            !sonic_rs::to_string(&omitted)
+                .unwrap()
+                .contains("multi_unit_bonus_evaluation")
+        );
+        let invalid = parse_json_body::<CalculateOptions>(
+            &Bytes::from_static(
+                br#"{"mode":"deck","region":"jp","user_data_str":"{}","multi_unit_bonus_evaluation":"sometimes"}"#,
+            ),
+            "calculate",
+        );
+        assert!(matches!(invalid, Err(AppError::BadRequest(_))));
     }
 }

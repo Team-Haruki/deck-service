@@ -875,8 +875,7 @@ mod tests {
     fn app_state(registry_url: Option<&str>) -> Arc<AppState> {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
-            DeckRecommend::init_data_path(concat!(env!("CARGO_MANIFEST_DIR"), "/_cpp_src/data"))
-                .unwrap();
+            DeckRecommend::init_data_path(concat!(env!("DECK_CPP_SRC_DIR"), "/data")).unwrap();
         });
         let registry = registry_url.map(|url| {
             let cfg = RegistryConfig::from_values(url, None, None, Some("2"), None).unwrap();

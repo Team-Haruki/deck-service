@@ -508,7 +508,8 @@ async fn recommend_legacy(
             }
             engine.recommend_raw_with_default_timeout(options_json, default_timeout_ms)
         })
-    })?;
+    })
+    .map_err(classify_recommend_error)?;
 
     tracing::info!(
         op_id,
@@ -519,6 +520,25 @@ async fn recommend_legacy(
     );
 
     json_response(result)
+}
+
+/// Engine messages caused by the request's own deck constraints, e.g. a
+/// pinned character (`fixed_characters` / forced leader) the user has no
+/// usable card for. Retrying the same request cannot succeed.
+const DECK_CONSTRAINT_ERRORS: &[&str] = &[
+    "has no usable card",
+    "no cards to select",
+    "Fixed cards and fixed characters exceed member count",
+];
+
+/// Report unsatisfiable deck constraints as 422 instead of an engine fault.
+fn classify_recommend_error(err: AppError) -> AppError {
+    match err {
+        AppError::Engine(msg) if DECK_CONSTRAINT_ERRORS.iter().any(|m| msg.contains(m)) => {
+            AppError::UnprocessableEntity(msg)
+        }
+        other => other,
+    }
 }
 
 async fn recommend_batch(
@@ -1307,10 +1327,30 @@ mod tests {
 
     use super::{
         MASTERDATA_REGISTRY_ENDPOINT, RecommendRequestMeta, batch_recommend_response_json,
-        deprecated_response, merge_native_batch_results, parse_json_body,
+        classify_recommend_error, deprecated_response, merge_native_batch_results, parse_json_body,
     };
     use crate::error::AppError;
     use crate::models::{CalculateOptions, MultiUnitBonusEvaluation};
+
+    #[test]
+    fn deck_constraint_errors_are_client_errors() {
+        use axum::response::IntoResponse;
+
+        for message in [
+            "Fixed character 18 has no usable card (not owned, rarity disabled or filtered by unit)",
+            "no cards to select",
+        ] {
+            let err = classify_recommend_error(AppError::Engine(message.into()));
+            assert!(matches!(&err, AppError::UnprocessableEntity(msg) if msg == message));
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+
+        let err = classify_recommend_error(AppError::Engine("Master data not found".into()));
+        assert!(matches!(err, AppError::Engine(_)));
+    }
 
     #[tokio::test]
     async fn deprecated_response_marks_headers_and_body() {

@@ -7,6 +7,8 @@ pub enum AppError {
     Engine(String),
     Timeout(String),
     BadRequest(String),
+    /// The request is well formed but its deck constraints cannot be met.
+    UnprocessableEntity(String),
     UnsupportedMediaType(String),
     Upstream(String),
     ServiceUnavailable(String),
@@ -18,6 +20,7 @@ impl std::fmt::Display for AppError {
             AppError::Engine(msg) => write!(f, "Engine error: {msg}"),
             AppError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {msg}"),
+            AppError::UnprocessableEntity(msg) => write!(f, "Unprocessable request: {msg}"),
             AppError::UnsupportedMediaType(msg) => write!(f, "Unsupported media type: {msg}"),
             AppError::Upstream(msg) => write!(f, "Upstream error: {msg}"),
             AppError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {msg}"),
@@ -31,6 +34,7 @@ impl IntoResponse for AppError {
             AppError::Engine(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             AppError::Timeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::UnprocessableEntity(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
             AppError::UnsupportedMediaType(msg) => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone())
             }

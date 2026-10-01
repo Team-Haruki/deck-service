@@ -27,6 +27,10 @@ pub struct AppState {
     /// Regions loaded from the registry, keyed by lowercase region.
     /// Directory-loaded regions are not tracked here.
     pub masterdata_state: Mutex<HashMap<String, RegionMasterState>>,
+    /// sha256 (hex) of music metas pushed as a string for regions the
+    /// registry does not track; registry regions keep theirs in
+    /// `masterdata_state`. Lets a client skip re-pushing identical metas.
+    pub music_metas_pushed: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {

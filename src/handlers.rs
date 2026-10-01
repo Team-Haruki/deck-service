@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,7 +24,7 @@ use crate::models::{
     UpdateMasterdataFromRegistryResponse, UpdateMasterdataRequest,
     UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest, WorldBloomSupportOptions,
 };
-use crate::registry::ensure_region;
+use crate::registry::{RegionMasterState, ensure_region};
 use crate::state::{AppState, EngineLease, UserdataInvalidation, invalidate_userdata};
 
 /// Successor of the deprecated directory endpoint `POST /update/masterdata`.
@@ -341,19 +342,55 @@ pub async fn update_masterdata_from_registry(
 }
 
 pub async fn masterdata_state(State(state): State<Arc<AppState>>) -> Json<MasterdataStateResponse> {
-    let regions = state
+    let regions: BTreeMap<String, RegionMasterState> = state
         .masterdata_state
         .lock()
         .iter()
         .map(|(region, value)| (region.clone(), value.clone()))
         .collect();
+    let mut music_metas: BTreeMap<String, String> = state
+        .music_metas_pushed
+        .lock()
+        .iter()
+        .map(|(region, digest)| (region.clone(), digest.clone()))
+        .collect();
+    for (region, value) in &regions {
+        if let Some(digest) = &value.music_metas_digest {
+            music_metas.insert(region.clone(), digest.clone());
+        }
+    }
     Json(MasterdataStateResponse {
         registry_url: state
             .registry
             .as_ref()
             .map(|client| client.base_url().to_owned()),
         regions,
+        music_metas,
     })
+}
+
+/// Record which music metas a region now holds after a push. A registry
+/// region keeps the digest in its state (the conditional-request etag is left
+/// alone, so the refresh loop still sees what it last fetched); any other
+/// region is tracked in `music_metas_pushed`. `None` (a file-path push)
+/// forgets the digest, since the loaded content is no longer known.
+fn record_pushed_music_metas(state: &AppState, region: &str, digest: Option<String>) {
+    let region = region.trim().to_ascii_lowercase();
+    let mut pushed = state.music_metas_pushed.lock();
+    let mut registry = state.masterdata_state.lock();
+    if let Some(loaded) = registry.get_mut(&region) {
+        loaded.music_metas_digest = digest;
+        pushed.remove(&region);
+        return;
+    }
+    match digest {
+        Some(digest) => {
+            pushed.insert(region, digest);
+        }
+        None => {
+            pushed.remove(&region);
+        }
+    }
 }
 
 pub async fn update_musicmetas(
@@ -378,6 +415,7 @@ pub async fn update_musicmetas(
             |engine| engine.update_musicmetas(&req.file_path, &req.region),
         )
     })?;
+    record_pushed_music_metas(state.as_ref(), &req.region, None);
     tracing::info!(
         op_id,
         op = "update_musicmetas",
@@ -409,6 +447,11 @@ pub async fn update_musicmetas_from_string(
             |engine| engine.update_musicmetas_from_string(&req.data, &req.region),
         )
     })?;
+    record_pushed_music_metas(
+        state.as_ref(),
+        &req.region,
+        Some(crate::registry::digest_hex(&req.data)),
+    );
     tracing::info!(
         op_id,
         op = "update_musicmetas_from_string",

@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod content_encoding;
 pub mod error;
 pub mod ffi;
 pub mod handlers;

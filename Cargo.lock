@@ -163,6 +163,7 @@ dependencies = [
  "sha2",
  "sonic-rs",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",

@@ -894,6 +894,7 @@ mod tests {
             userdata_cache: UserdataCache::default(),
             registry,
             masterdata_state: Mutex::new(HashMap::new()),
+            music_metas_pushed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1109,6 +1110,88 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(ok, sonic_rs::json!({ "status": "ok" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn music_metas_state_follows_registry_loads_and_pushes() {
+        use crate::handlers::{
+            masterdata_state, update_masterdata_from_registry, update_musicmetas,
+            update_musicmetas_from_string,
+        };
+        use crate::models::{
+            UpdateMasterdataFromRegistryRequest, UpdateMusicmetasFromStringRequest,
+            UpdateMusicmetasRequest,
+        };
+
+        // A registry region reports the digest of what it loaded, and a later
+        // string push replaces it.
+        let registry: Shared = Arc::default();
+        let hash = publish(&registry, "cn", &all_keys(), "2.0.0");
+        publish_metas(&registry, "cn", MUSIC_METAS_V1);
+        let url = serve_fake_registry(registry.clone()).await;
+        let state = app_state(Some(&url));
+        let _ = update_masterdata_from_registry(
+            State(state.clone()),
+            axum::Json(UpdateMasterdataFromRegistryRequest {
+                region: "cn".into(),
+                content_hash: Some(hash),
+            }),
+        )
+        .await
+        .unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(state.clone())).await;
+        assert_eq!(snapshot.music_metas["cn"], digest_hex(MUSIC_METAS_V1));
+        let text = sonic_rs::to_string(&snapshot).unwrap();
+        assert!(text.contains("\"musicMetas\""), "{text}");
+
+        let _ = update_musicmetas_from_string(
+            State(state.clone()),
+            axum::Json(UpdateMusicmetasFromStringRequest {
+                data: MUSIC_METAS_V2.into(),
+                region: "cn".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(state.clone())).await;
+        assert_eq!(snapshot.music_metas["cn"], digest_hex(MUSIC_METAS_V2));
+        assert_eq!(
+            snapshot.regions["cn"].music_metas_digest.as_deref(),
+            Some(digest_hex(MUSIC_METAS_V2).as_str())
+        );
+
+        // A region the registry does not track is reported from the push, and
+        // a file-path push forgets the digest.
+        let plain = app_state(None);
+        let _ = update_musicmetas_from_string(
+            State(plain.clone()),
+            axum::Json(UpdateMusicmetasFromStringRequest {
+                data: MUSIC_METAS_V1.into(),
+                region: "jp".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(plain.clone())).await;
+        assert_eq!(snapshot.music_metas["jp"], digest_hex(MUSIC_METAS_V1));
+        assert!(snapshot.regions.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("deck-metas-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("music_metas.json");
+        std::fs::write(&file, MUSIC_METAS_V2).unwrap();
+        let _ = update_musicmetas(
+            State(plain.clone()),
+            axum::Json(UpdateMusicmetasRequest {
+                file_path: file.to_string_lossy().into_owned(),
+                region: "jp".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(plain)).await;
+        assert!(!snapshot.music_metas.contains_key("jp"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

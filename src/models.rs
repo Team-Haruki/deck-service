@@ -363,6 +363,10 @@ pub struct UpdateMasterdataFromRegistryResponse {
 pub struct MasterdataStateResponse {
     pub registry_url: Option<String>,
     pub regions: BTreeMap<String, crate::registry::RegionMasterState>,
+    /// sha256 (hex) of the music metas each region currently holds, whichever
+    /// path loaded them (registry or a string push). Absent for a region whose
+    /// metas came from a file path or were never loaded.
+    pub music_metas: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -75,6 +75,10 @@ Batch `/recommend` picks its execution strategy from `DECK_ENGINE_THREADS`:
 
 `/cache_userdata` and batch `/recommend` (content-type `application/octet-stream`) use zstd-compressed, length-prefixed segments: 4-byte big-endian length + payload per segment.
 
+HTTP content coding is negotiated in `content_encoding.rs` (an Axum `from_fn` middleware outside `DefaultBodyLimit`): every response advertises `Accept-Encoding: zstd`; `Content-Encoding: zstd` request bodies are decoded with `ruzstd` under the same byte limit as identity bodies; JSON/text responses ≥ 1 KiB are zstd-encoded when the request accepts it. Keep it pure Rust (`ruzstd`), no C zstd dependency — the runtime image is `scratch`.
+
+`GET /state/masterdata` reports `musicMetas` (region → sha256 of the loaded music metas); string pushes record their digest (`record_pushed_music_metas`) so Cloud can skip re-pushing identical metas after its own restart.
+
 ## Build System
 
 - `build.zig` compiles the C++ source list from `cpp_sources.txt` + the C bridge into `libdeck_recommend.a` for Zig-backed targets

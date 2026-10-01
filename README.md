@@ -353,6 +353,18 @@ For `application/octet-stream` endpoints, concatenate one or more segments as
 stream. `/cache_userdata` and batch `/recommend` currently expect exactly one
 segment.
 
+### HTTP Content Coding
+
+Every response carries `Accept-Encoding: zstd`: any endpoint accepts a
+`Content-Encoding: zstd` request body (for example the JSON of
+`/update/musicmetas/string`). The decoded body is held to the same 1000 MiB
+limit as an identity body (413 past it, 400 for an invalid frame); any other
+non-identity coding gets 415. JSON and text responses of 1 KiB or more are
+zstd-encoded when the request's `Accept-Encoding` allows `zstd`. Clients send
+zstd bodies only after seeing the advertisement, so old and new versions mix
+safely. The octet-stream endpoints above are already zstd and are not encoded
+twice.
+
 ### World Bloom Support Cards
 
 ```
@@ -392,7 +404,11 @@ re-checks music metas (conditional GET), a changed `contentHash` reloads.
 a non-empty JSON array; the region keeps its previously loaded data.
 
 GET /state/masterdata
-→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest", "missingOptionalKeys": ["ingameNotes", …] } } }
+→ { "registryUrl": "http://…" | null, "regions": { "jp": { "contentHash", "gitCommit", "dataVersion", "loadedAt", "source": "registry", "musicMetasDigest", "missingOptionalKeys": ["ingameNotes", …] } }, "musicMetas": { "jp": "<sha256 hex>" } }
+`musicMetas` is the sha256 of the music metas each region holds, whether the
+registry or `/update/musicmetas/string` loaded them (a push also updates that
+region's `musicMetasDigest`); a file-path push removes the entry. Clients
+compare it with their own metas and skip an identical push.
 Only registry-loaded regions are listed; directory-loaded regions have no
 version identity and are omitted. `missingOptionalKeys` (sorted) is present
 only when the loaded manifest lacked optional engine keys; the load still

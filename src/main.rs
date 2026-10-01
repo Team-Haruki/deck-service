@@ -12,6 +12,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use deck_service::bridge::DeckRecommend;
+use deck_service::content_encoding;
 use deck_service::handlers;
 use deck_service::masterdata::{MasterdataSignature, masterdata_signature};
 use deck_service::registry::{self, RegistryClient, RegistryConfig};
@@ -92,6 +93,7 @@ async fn main() {
         ),
         registry: registry_client,
         masterdata_state: parking_lot::Mutex::new(HashMap::new()),
+        music_metas_pushed: parking_lot::Mutex::new(HashMap::new()),
     });
 
     let cache_state = Arc::clone(&state);
@@ -157,7 +159,10 @@ async fn main() {
             "/update/musicmetas/string",
             post(handlers::update_musicmetas_from_string),
         )
-        .layer(DefaultBodyLimit::max(1000 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(content_encoding::MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn(
+            content_encoding::zstd_content_encoding,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

@@ -16,8 +16,8 @@ C bridge.
 **Prerequisites:** Rust >= 1.85, Zig >= 0.14, cargo-zigbuild
 
 ```bash
-# Clone C++ engine source (gitignored, required for build)
-git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src
+# Clone the pinned C++ engine (commit in cpp-engine.ref) into _cpp_src (gitignored, required for build)
+./scripts/prepare-cpp-engine.sh
 
 # Native build
 cargo build --release
@@ -111,17 +111,53 @@ Examples from this repo's history:
 
 ## GitHub Actions workflows
 
-Use the standardized workflow layout in `.github/workflows`:
+CI reuses the shared templates in
+[`seiunx-dev/ci-templates`](https://github.com/seiunx-dev/ci-templates) at `@v1`.
+The files in `.github/workflows` are thin callers:
 
-- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
-- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
-- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+- The C++ engine commit lives only in `cpp-engine.ref`. `scripts/prepare-cpp-engine.sh`
+  clones that commit (with submodules) into `_cpp_src/` for CI and release builds, and
+  the Dockerfile COPYs and reads the same file. Bump the engine by editing
+  `cpp-engine.ref` alone.
+- `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
+  dispatch:
+  - `Rust` (`rust-ci`, setup hook `prepare-cpp-engine.sh`): fmt, clippy
+    `--all-targets -D warnings`, `cargo test`.
+  - `C++ bridge tests + coverage` (custom job in the caller; no template covers gcov):
+    `scripts/ci-cpp-coverage.sh` runs the `cpp_bridge` test and the C test harness with
+    `--coverage` and writes `coverage/cpp.xml` (Sonar generic format via gcovr).
+  - `Sonar` scans that coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
+    runs actionlint.
+  - `Docker` does not wait for the tests. PRs build only; on `main` it pushes the
+    immutable `ghcr.io/team-haruki/deck-service:sha-<full sha>` and `:sha-<7 chars>` as
+    soon as the build finishes; the `Docker tags` job (`docker-retag.yml`, after
+    `CI OK`) then moves `:main` to that digest without rebuilding, so `:main` only
+    follows commits whose `CI OK` passed.
+- The aggregate job **`CI OK`** is the only required status check.
+- `release.yml` (`Release`): bump `version` in `Cargo.toml` in a PR → merge and wait for
+  `CI OK` on `main` → push the tag `v<version>`. `release-gate` refuses a tag that
+  differs from `Cargo.toml` and waits for `CI OK` on the tagged commit; then the
+  binaries are built (tags only), the `main` image `:sha-<sha>` is promoted (re-tagged,
+  not rebuilt) to `:<version>`, `:<major>.<minor>` and `:latest`, and the GitHub Release
+  is published with `SHA256SUMS-<tag>.txt`. Manual dispatch is a dry run: it builds the
+  binaries and publishes nothing.
+- Release assets are a contract: `deck-service-linux-x64.tar.gz` and
+  `deck-service-macos-arm64.tar.gz`, each with the bare `deck-service` binary at the
+  archive root. MejiroRina/SekaiColo's Dockerfile downloads
+  `deck-service-linux-x64.tar.gz` (`DECK_SERVICE_RELEASE_URL`), so keep the names, the
+  flat layout and the glibc (`x86_64-unknown-linux-gnu`) linkage unless SekaiColo
+  changes too.
 
 Workflow maintenance rules:
 
-- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v7`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
-- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
-- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
-- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
+- Use the shared templates first. Add custom jobs or steps only when a template
+  genuinely cannot meet the project's needs, keep them in the thin caller files, and
+  add a comment explaining why.
+- Template bugs and missing features are fixed upstream in `seiunx-dev/ci-templates`
+  (new `v1.x.y` tag), not worked around here.
+- Keep top-level `permissions: contents: read`; grant `packages: write` / `contents: write`
+  only on the job that needs it.
+- Do not suppress `githubactions:S7637` (full-SHA pins) in `sonar-project.properties`: the
+  template's `sonar.yml` already ignores it for the `@v1` references.
+- Third-party actions in caller-side custom steps are pinned to a full commit SHA with a
+  `# vX.Y.Z` comment; Dependabot (`github-actions`) updates them and the template refs.

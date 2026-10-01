@@ -24,13 +24,16 @@ RUN cargo install cargo-zigbuild && \
 
 WORKDIR /build
 
-# Clone C++ engine source
+# Clone C++ engine source. The commit comes from cpp-engine.ref (the single pin shared with
+# CI and releases); DECK_CPP_REF overrides it for a deliberate one-off build.
 ARG DECK_CPP_REPO=https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git
 ARG DECK_CPP_BRANCH=master
-ARG DECK_CPP_REF=a27c4297d061661dd1ccf08754f09cefbdda5ca2
-RUN git clone --branch "${DECK_CPP_BRANCH}" --single-branch "${DECK_CPP_REPO}" _cpp_src && \
+ARG DECK_CPP_REF=
+COPY cpp-engine.ref ./
+RUN ref="${DECK_CPP_REF:-$(tr -d '[:space:]' < cpp-engine.ref)}" && \
+    git clone --branch "${DECK_CPP_BRANCH}" --single-branch "${DECK_CPP_REPO}" _cpp_src && \
     cd _cpp_src && \
-    git checkout "${DECK_CPP_REF}" && \
+    git checkout "${ref}" && \
     git submodule update --init --recursive
 
 # Copy project files

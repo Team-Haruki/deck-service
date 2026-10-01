@@ -11,7 +11,7 @@ if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
   echo "::error file=cpp-engine.ref::expected a full 40-char commit SHA, got '$ref'"
   exit 1
 fi
-if [ -d _cpp_src/.git ] && [ "$(git -C _cpp_src rev-parse HEAD)" = "$ref" ]; then
+if [[ -d _cpp_src/.git && "$(git -C _cpp_src rev-parse HEAD)" == "$ref" ]]; then
   echo "_cpp_src already at $ref"; exit 0
 fi
 rm -rf _cpp_src

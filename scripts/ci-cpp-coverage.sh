@@ -11,7 +11,7 @@ mkdir -p target/coverage "$(dirname "$out")"
 find target/coverage -name '*.gcda' -delete
 cargo test --locked --test cpp_bridge
 bridge_library="$(find target/coverage/debug/build -path '*/out/native-cpp/lib/libdeck_recommend.a' -print -quit)"
-[ -n "$bridge_library" ] || { echo "libdeck_recommend.a not found under target/coverage" >&2; exit 1; }
+[[ -n "$bridge_library" ]] || { echo "libdeck_recommend.a not found under target/coverage" >&2; exit 1; }
 test_dir="target/coverage/cpp-tests"
 mkdir -p "$test_dir"
 c++ -std=c++20 -O0 -g --coverage -fno-sanitize=all \

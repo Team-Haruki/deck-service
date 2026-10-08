@@ -11,16 +11,16 @@ HTTP Request → Axum (Rust) → JSON FFI Bridge → C++ Engine → JSON Respons
 - **Rust + Axum** — async HTTP server with JSON request/response handling
 - **C FFI Bridge** (`cpp_bridge/`) — translates between Rust and the C++ engine via JSON strings
 - **C++ Engine** (`_cpp_src/`) — Team Haruki's maintained [sekai-deck-recommend-cpp](https://github.com/Team-Haruki/sekai-deck-recommend-cpp) fork, consumed here as core C++ sources through a C/Rust FFI bridge
-- **Zig** — builds the C++ bridge/engine archive for static/cross targets through `build.zig`
+- **Zig** — builds the C++ bridge/engine archive for static/cross targets (through `build.zig`, or `zig c++` directly on macOS hosts)
 
-The output binary is **fully statically linked** (musl libc) with no runtime dependencies, ideal for minimal container images.
+The `cargo zigbuild` musl build (and the Docker image) is **fully statically linked** with no runtime dependencies, ideal for minimal container images. A native `cargo build` links the platform C++ runtime (libstdc++ on Linux GNU, libc++ on macOS); the `deck-service-linux-x64` release asset is such a glibc build.
 
 ## Prerequisites
 
 For deck-service itself:
 
 - [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024)
-- [Zig](https://ziglang.org/download/) ≥ 0.14
+- [Zig](https://ziglang.org/download/) 0.15.x (the Dockerfile pins 0.15.2) — for cross-compilation
 - [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) — for cross-compilation
 - `g++` / libstdc++ headers — for Linux GNU host builds (`cargo build`)
 
@@ -38,21 +38,17 @@ the upstream package targets.
 
 ### Clone C++ source
 
-The C++ source is gitignored. The current deck-service build tracks Team
-Haruki's default upstream branch (`master`). Clone it into `_cpp_src/` with
-submodules:
+The C++ source is gitignored. Builds are pinned to the upstream commit in
+`cpp-engine.ref` (on Team Haruki's `master` branch); CI, release builds and the
+Dockerfile all use that pin. Clone it into `_cpp_src/` with submodules:
 
 ```bash
-git clone --recursive https://github.com/Team-Haruki/sekai-deck-recommend-cpp.git _cpp_src
+./scripts/prepare-cpp-engine.sh
 ```
 
-For an existing checkout:
-
-```bash
-git -C _cpp_src fetch origin master
-git -C _cpp_src checkout master
-git -C _cpp_src submodule update --init --recursive
-```
+The script does nothing when `_cpp_src/` is already at the pinned commit;
+otherwise it deletes `_cpp_src/` and clones it again, so keep local engine edits
+in a separate checkout.
 
 You can also keep the C++ repository elsewhere and point builds at it:
 
@@ -77,7 +73,9 @@ Output: `target/x86_64-unknown-linux-musl/release/deck-service` (~4 MB, statical
 ## Running
 
 ```bash
-# Required: path to the C++ engine's static data directory.
+# Path to the C++ engine's static data directory (default: ../../_cpp_src/data
+# relative to the binary's directory, i.e. this repo's _cpp_src/data for
+# target/release/deck-service).
 # This is the upstream static data/, not runtime masterdata/music metas.
 # Treated as read-only static data; the RL seed cache goes to DECK_RL_SEED_CACHE_FILE.
 export DECK_DATA_DIR=/path/to/_cpp_src/data
@@ -87,8 +85,8 @@ export DECK_DATA_DIR=/path/to/_cpp_src/data
 export DECK_RL_SEED_CACHE_FILE=/path/to/cache/rl_seed_cache.tsv
 
 # Preferred: pull master data (and music metas) from the Haruki master registry.
-# Plain http on the private network; replaces the mounted masterdata volume.
-export DECK_REGISTRY_URL=http://100.76.159.97:9998
+# Plain http only (no TLS backend); replaces the mounted masterdata volume.
+export DECK_REGISTRY_URL=http://registry.example:9998
 
 # Legacy/deprecated: preload region masterdata from a mounted directory at startup
 export DECK_MASTERDATA_BASE_DIR=/path/to/masterdata-root
@@ -387,6 +385,40 @@ Response: JSON array of support cards sorted by support bonus descending:
 ]
 ```
 
+### Calculate Fixed Deck
+
+```
+POST /calculate
+Content-Type: application/json
+```
+
+Scores a deck the user already has instead of searching for one.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `mode` | `string` | `"deck"` (user deck `deck_id`), `"challenge"` (challenge live solo deck of `character_id`) or `"live_full"` (either one, plus a solo live score) |
+| `region` | `string` | Game region |
+| `user_data_str` | `string` | User data as inline JSON string (required) |
+| `deck_id` | `int` | User deck ID (`deck`, or `live_full`) |
+| `character_id` | `int` | Challenge live character ID (`challenge`, or `live_full`) |
+| `music_id` | `int` | Music ID (`live_full` only, required there) |
+| `difficulty` | `string` | Music difficulty (`live_full` only, required there) |
+| `skills` | `object[]` | Optional explicit skill order for `live_full`: entries with `cardId` (or `card_id`) and optional `seq` |
+| `multi_unit_bonus_evaluation` | `string` | Same as for `/recommend` |
+
+Response: `deck` and `challenge` return `{ "totalPower", "detail" }`;
+`live_full` returns `{ "totalPower", "liveScore", "deckDetail", "liveDetail" }`.
+`live_full` needs the region's music metas.
+
+### User Data Cache Stats
+
+```
+GET /cache/stats
+→ { "entries", "bytes", "max_bytes", "max_entries", "ttl_seconds", "evictions" }
+```
+
+See [User data cache limits](#user-data-cache-limits).
+
 ### Update Masterdata (registry / legacy directory)
 
 ```
@@ -422,8 +454,8 @@ requests fail per request rather than compute a zero bonus.
 POST /update/masterdata   (Deprecated: legacy directory path)
 { "base_dir": "/path/to/masterdata", "region": "jp" }
 → { "status": "ok", "deprecated": true, "replacement": "/update/masterdata/registry" }
-Deprecated; use `POST /update/masterdata/registry`. Removed in the release after
-the registry fetcher (deck-service #19) ships. Status codes and error bodies are
+Deprecated; use `POST /update/masterdata/registry`. Still served for existing
+callers and slated for removal; no removal release is set. Status codes and error bodies are
 unchanged; a successful response carries `Deprecation: true` and
 `Link: </update/masterdata/registry>; rel="successor-version"`, and each call
 logs a warning.
@@ -518,23 +550,31 @@ This enables per-request `op_id` logs around:
 deck-service/
 ├── src/
 │   ├── main.rs          # Axum router & server entry point
+│   ├── lib.rs           # Library crate declaring the modules (used by main.rs and tests/)
 │   ├── handlers.rs      # HTTP route handlers
 │   ├── models.rs        # Request/response serde types
 │   ├── bridge.rs        # Safe Rust wrapper around C FFI
 │   ├── ffi.rs           # Raw unsafe extern "C" bindings
-│   ├── state.rs         # Shared application state (Mutex<Engine>)
+│   ├── state.rs         # Shared application state, EnginePool (reader/writer engine pool)
+│   ├── userdata_cache.rs # Userdata payload LRU cache (bytes, idle TTL, region tags)
+│   ├── content_encoding.rs # zstd HTTP content-coding middleware
 │   ├── registry.rs      # Master registry client (manifest, blobs, music metas)
 │   ├── masterdata.rs    # Legacy masterdata directory resolution (deprecated path)
 │   ├── masterdata_audit.rs # Master data key checks (required, key tables, optional)
 │   └── error.rs         # AppError → HTTP response mapping
 ├── cpp_bridge/
 │   ├── deck_recommend_c.h    # C API header
-│   └── deck_recommend_c.cpp  # C bridge implementation (yyjson)
-├── build.rs             # Cargo glue for Zig-built C++ static library
+│   ├── deck_recommend_c.cpp  # C bridge implementation (yyjson)
+│   └── auto_score_policy.h   # Finale AUTO score coefficient policy
+├── tests/               # Bridge/engine integration tests + C test harness
+├── scripts/             # prepare-cpp-engine.sh, ci-cpp-coverage.sh
+├── build.rs             # Cargo glue: C++ source resolution, native or Zig build, link metadata
 ├── build.zig            # Zig build file for the C++ bridge/engine archive
 ├── cpp_sources.txt      # C++ engine source list shared by build tooling
+├── cpp-engine.ref       # Pinned C++ engine commit (CI, releases, Docker)
 ├── Cargo.toml
 ├── Dockerfile
+├── Dockerfile.runtime   # Runtime image from a prebuilt binary
 └── _cpp_src/            # (gitignored) cloned Team Haruki C++ engine source
 ```
 

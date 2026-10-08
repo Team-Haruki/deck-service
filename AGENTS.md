@@ -11,10 +11,58 @@ The current upstream source is [Team-Haruki/sekai-deck-recommend-cpp](https://gi
 ## Language & Toolchain
 
 - **Rust** (edition 2024) with Axum 0.8, Tokio, sonic-rs (not serde_json)
-- **C++20** compiled by `build.zig` for Zig targets; native Linux GNU uses system `c++`/`ar`
-- **Zig** is used only as a C++ compiler toolchain, not as the project language
+- **C++20**: native builds (host == target, Linux GNU or macOS) use the system `c++`/`ar`; cross builds use Zig (`build.zig` on non-macOS hosts, `zig c++` per object on macOS hosts)
+- **Zig** (0.15.x; the Dockerfile pins 0.15.2, and `build.zig` uses the 0.15 `std.ArrayList` API) is used only as a C++ compiler toolchain, not as the project language
 - Cross-compilation: `cargo zigbuild --target x86_64-unknown-linux-musl`
 - Upstream package tooling such as CMake, Python/uv, and emsdk is only needed when working in the C++ repository's Python or WebAssembly package targets.
+
+## Build & Run
+
+**Prerequisites:** Rust >= 1.85 (edition 2024); for cross builds Zig 0.15.x and `cargo-zigbuild`; for native Linux GNU builds a system C++ compiler with libstdc++ headers
+
+```bash
+# Clone the pinned C++ engine (commit in cpp-engine.ref) into _cpp_src (gitignored, required for build)
+./scripts/prepare-cpp-engine.sh
+
+# Native build
+cargo build --release
+
+# Cross-compile to a static Linux binary (musl)
+cargo zigbuild --release --target x86_64-unknown-linux-musl
+
+# Run; DECK_DATA_DIR defaults to ../../_cpp_src/data relative to the executable's directory,
+# which is this checkout's _cpp_src/data for target/<profile>/deck-service
+DECK_DATA_DIR=./_cpp_src/data cargo run --release
+```
+
+`prepare-cpp-engine.sh` deletes and re-clones `_cpp_src/` whenever its `HEAD` is not the commit in `cpp-engine.ref`; keep local engine edits in a separate checkout and point `DECK_CPP_SRC` at it.
+
+## Testing
+
+- `cargo test` runs the inline `#[cfg(test)]` modules (`content_encoding.rs`, `handlers.rs`, `main.rs`, `masterdata_audit.rs`, `registry.rs`, `state.rs`, `userdata_cache.rs`) and the integration tests in `tests/`: `cpp_bridge.rs` (C bridge) and `jp_700_engine.rs` (JP 7.0.0 engine rules through the bridge with synthetic data; its real-data test runs only when `DECK_TEST_JP_MASTER_DIR` points at a JP 7.0.0+ master data directory, otherwise it skips).
+- Tests load the engine's static data from the resolved C++ source (`DECK_CPP_SRC_DIR`, emitted by `build.rs`), so run `./scripts/prepare-cpp-engine.sh` first.
+- `scripts/ci-cpp-coverage.sh [out.xml]` (needs `gcovr` on `PATH`) builds with `DECK_CPP_COVERAGE=1`, runs `cargo test --test cpp_bridge` and the C harness `tests/deck_recommend_c_test.cpp`, and writes a Sonar generic coverage report. `DECK_CPP_COVERAGE` only works for native Linux GNU builds.
+- CI runs fmt, clippy and `cargo test` plus the coverage script; see [GitHub Actions workflows](#github-actions-workflows).
+
+## Environment Variables
+
+- `DECK_DATA_DIR` — C++ engine static data directory (read-only). Optional: unset falls back to `_cpp_src/data` relative to the executable (see Build & Run); the Docker image sets `/data`
+- `DECK_RL_SEED_CACHE_FILE` / `DECK_RL_SEED_CACHE_DISABLE` — engine RL seed cache file (unset → `$DECK_DATA_DIR/rl_seed_cache.tsv`; the image sets `/cache/rl_seed_cache.tsv`) and the literal `1` kill switch; `main.rs` probes writability at startup and logs enabled / disabled / not-writable
+- `DECK_REGISTRY_URL` — master registry base URL (plain `http`: `reqwest` is built without a TLS backend). When set, `DECK_REGISTRY_REGIONS` (default `jp,en,cn,tw,kr`) are pulled from the registry (`registry.rs`: manifest → the 38 engine keys by blob digest → `update_masterdata_from_json`, plus music metas) and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` (300000, `0` disables), `DECK_REGISTRY_FETCH_CONCURRENCY` (8, clamped 1–64) and `DECK_REGISTRY_TIMEOUT_MS` (30000, at least 1000) tune it; `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
+- `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` — legacy (deprecated) masterdata directory preloaded on startup; `POST /update/masterdata` (`base_dir`) is deprecated in favour of `POST /update/masterdata/registry`
+- `DECK_MASTERDATA_REGIONS` — legacy: CSV of regions to preload from the directory (default `jp,en,cn,tw,kr`)
+- `DECK_MASTERDATA_REFRESH_MS` — legacy: directory refresh watcher interval (default 300000, `0` disables)
+- `DECK_MUSICMETAS_DIR` / `DECK_MUSICMETAS_BASE_DIR` — music metas directory preloaded on startup (falls back to the masterdata directory, then `/app/data`)
+- `DECK_MUSICMETAS_REGIONS` — CSV of music metas regions to preload (default `jp,en,cn,tw,kr`)
+- `DECK_MUSICMETAS_FILE_<REGION>` — explicit music metas file for one region
+- `DECK_ENGINE_POOL_SIZE` — number of engine instances (default `min(cpu_count, 4)`)
+- `DECK_ENGINE_THREADS` — C++ engine-internal thread count (default 1)
+- `DECK_USERDATA_CACHE_MAX_ENTRIES` / `DECK_USERDATA_CACHE_MAX_BYTES` / `DECK_USERDATA_CACHE_TTL_SECONDS` — userdata payload cache bounds (defaults 128 / 256 MiB / 1800 s)
+- `DECK_RECOMMEND_TIMEOUT_MS` — default timeout injected when requests omit `timeout_ms`
+- `DECK_LOCK_WARN_MS` / `DECK_LOCK_TIMEOUT_MS` / `DECK_ENGINE_WARN_MS` — pool wait warn threshold, pool acquire timeout, engine op warn threshold (defaults 1000 / 30000 / 10000 ms)
+- `BIND_ADDR` — HTTP listen address (default `0.0.0.0:3000`)
+- `RUST_LOG` — tracing `EnvFilter` directives
+- Build time: `DECK_CPP_SRC` (C++ source override, see Build System), `DECK_CPP_COVERAGE` (gcov instrumentation, see Testing)
 
 ## Architecture
 
@@ -31,25 +79,28 @@ All Rust source files are directly in `src/` — no nested modules:
 | File | Responsibility |
 | --- | --- |
 | `main.rs` | Router setup, server entry point, env var handling, masterdata/musicmetas preloading, masterdata refresh watcher |
-| `lib.rs` | Library facade re-exporting the modules below |
+| `lib.rs` | Library crate (`deck_service`) declaring the modules below; `main.rs` and the integration tests use it |
 | `handlers.rs` | Axum route handler functions |
 | `models.rs` | Serde request/response types (mirrors Python `.pyi` interface) |
 | `bridge.rs` | Safe wrapper around FFI (owns the C++ handle, implements `Drop`) |
 | `ffi.rs` | Raw `unsafe extern "C"` declarations + helper functions |
-| `state.rs` | `AppState`, `EnginePool` (reader/writer concurrency), `UserdataCache` |
+| `state.rs` | `AppState`, `EnginePool` (reader/writer concurrency), `invalidate_userdata`; re-exports `UserdataCache` |
+| `userdata_cache.rs` | `UserdataCache`: LRU userdata payload cache with byte budget, idle TTL and region tags; `CacheStats` for `GET /cache/stats` |
+| `content_encoding.rs` | zstd HTTP content-coding middleware and the shared `MAX_BODY_BYTES` limit |
 | `masterdata.rs` | Legacy masterdata directory resolution with region-aware candidate search (the directory path and `POST /update/masterdata` are deprecated) |
-| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the 37-key lock tests |
-| `registry.rs` | Master registry client: frozen 37-key engine list, manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
+| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the lock tests for the 25 required + 13 optional engine keys |
+| `registry.rs` | Master registry client: frozen engine key list (25 required + 13 optional = 38), manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
 | `error.rs` | `AppError` enum with `IntoResponse` impl |
 
 ## Key Conventions
 
 - **JSON library**: Use `sonic_rs`, never `serde_json`. Import `sonic_rs::json!` for constructing ad-hoc values.
 - **Blocking FFI**: C++ calls are synchronous. Always wrap in `tokio::task::block_in_place` within async handlers.
-- **Error handling**: Return `Result<_, AppError>` from handlers. `AppError::Engine(String)` for C++ errors, `AppError::BadRequest(String)` for input validation, `AppError::Timeout(String)` for pool timeouts.
+- **Error handling**: Return `Result<_, AppError>` from handlers; errors render as `{"error": "..."}`. `Engine` (500) for C++ errors, `BadRequest` (400) for input validation, `UnprocessableEntity` (422) for deck constraints the engine cannot meet, `Timeout` (504) for pool timeouts, `UnsupportedMediaType` (415) for an unsupported `Content-Type` (the content-coding middleware returns its own 415 for unknown codings), `Upstream` (502) / `ServiceUnavailable` (503) for registry failures / registry not configured.
 - **FFI safety**: `DeckRecommend` is `Send` but not `Sync`. Concurrent access goes through `EnginePool`.
 - **Optional fields**: All optional request fields use `#[serde(skip_serializing_if = "Option::is_none")]`.
-- **Tests**: Unit tests live inline under `#[cfg(test)]` (native batch result merging in `handlers.rs`, env parsing helpers in `main.rs`); run with `cargo test`. The C++ engine itself is tested upstream.
+- **Comments**: Minimal — only where the logic is not self-evident.
+- **Tests**: see [Testing](#testing).
 
 ## Concurrency Model
 
@@ -58,7 +109,7 @@ All Rust source files are directly in `src/` — no nested modules:
 - **Reader** (`checkout`): acquires one engine slot for a single recommend call. Multiple readers run concurrently.
 - **Writer** (`checkout_all`): acquires exclusive access to all engines for broadcast operations (masterdata/musicmeta updates). Blocks all readers; writer-priority prevents starvation.
 
-Each engine slot tracks which userdata hashes it has loaded (`HashSet<String>`) to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand.
+Each engine slot tracks which userdata hashes it has loaded to avoid redundant FFI calls. `UserdataCache` holds the actual userdata payloads server-side so any engine can replay them on demand. Clients call `/cache_userdata` first and then reference the returned hash in `/recommend`, `/world_bloom/support_cards` and batch requests.
 
 `UserdataCache` (`src/userdata_cache.rs`) is an LRU bounded by `DECK_USERDATA_CACHE_MAX_ENTRIES` (128), `DECK_USERDATA_CACHE_MAX_BYTES` (256 MiB) and an idle `DECK_USERDATA_CACHE_TTL_SECONDS` (1800); each engine slot tracks at most 64 loaded hashes, the C++ `SharedUserdataStore` cap. `/cache_userdata` carries no region, so entries are tagged on use (`get(hash, Some(region))` from recommend, batch recommend and world bloom support cards). Every exclusive update (masterdata/musicmetas handlers, the directory refresh watcher, the registry path) must call `invalidate_userdata(..., UserdataInvalidation::Region(region))` rather than clearing the cache directly: it evicts entries tagged with that region plus untagged entries and prunes exactly those hashes from every engine slot. LRU and idle eviction inside the cache do not prune slot hash sets (no exclusive lease is held); a stale slot hash is harmless because the request fails at `resolve_userdata_payload` first. Lock order is pool, then cache; never take the cache lock and then the pool.
 
@@ -86,12 +137,14 @@ HTTP content coding is negotiated in `content_encoding.rs` (an Axum `from_fn` mi
 - C++ source location resolved in order: `DECK_CPP_SRC` env → `_cpp_src/` → sibling `sekai-deck-recommend-cpp/`
 - Fetch the pinned upstream source with `./scripts/prepare-cpp-engine.sh` (clones the commit in `cpp-engine.ref`, with submodules, into `_cpp_src/`)
 - For musl targets, links `c++` and `c++abi` statically; macOS uses `c++`; Linux-gnu uses `stdc++`
-- Native Linux-gnu host builds use system `c++`/`ar` to avoid mixing system libstdc++ headers with Zig glibc headers
+- Native builds (host == target) on Linux GNU and macOS use system `c++`/`ar` (`CXX`/`CC`/`AR` override them); on Linux GNU this avoids mixing system libstdc++ headers with Zig glibc headers
+- Cross builds from a macOS host compile each object with `zig c++` directly; other cross builds go through `build.zig`
 
 ## C++ Bridge (`cpp_bridge/`)
 
 - `deck_recommend_c.h` — C API with opaque `DeckRecommendHandle`
 - `deck_recommend_c.cpp` — Full implementation that parses JSON options and calls the C++ engine
+- `auto_score_policy.h` — finale AUTO score coefficient policy used by the bridge
 - Error convention: functions return `const char*` (NULL = success, non-NULL = error message). Caller must free with `deck_recommend_free_string`.
 - The `recommend` function returns a JSON result string and takes an `error_out` parameter.
 

@@ -253,3 +253,18 @@ Workflow maintenance rules:
   template's `sonar.yml` already ignores it for the `@v1` references.
 - Third-party actions in caller-side custom steps are pinned to a full commit SHA with a
   `# vX.Y.Z` comment; Dependabot (`github-actions`) updates them and the template refs.
+
+## Release notes
+
+Release notes follow the org standard
+[`RELEASE_NOTES.md`](https://github.com/seiunx-dev/ci-templates/blob/main/RELEASE_NOTES.md),
+written in English:
+
+- The release title is the tag only, for example `v0.6.6`.
+- Tags with an `-alpha`, `-beta` or `-rc` suffix are pre-releases; every other tag is a
+  regular release, and every tag gets a release.
+- Omit empty sections; a fix-only release has just the summary, **Fixed** and the
+  **Full Changelog** link.
+- End every item with its PR number `(#123)`, or the short commit SHA when there is no PR.
+- After `release.yml` publishes the release with auto-generated notes, rewrite them to the
+  standard with `gh release edit <tag> --notes-file <file>`.

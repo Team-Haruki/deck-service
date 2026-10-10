@@ -431,10 +431,15 @@ pub async fn update_musicmetas(
             op_id,
             "update_musicmetas",
             UserdataInvalidation::Region(&req.region),
-            |engine| engine.update_musicmetas(&req.file_path, &req.region),
+            |engine| {
+                engine.update_musicmetas(&req.file_path, &req.region)?;
+                // Under the exclusive pool lock, like the registry refresh, so
+                // the engine and the recorded digest/etag change together.
+                record_pushed_music_metas(state.as_ref(), &req.region, None);
+                Ok(())
+            },
         )
     })?;
-    record_pushed_music_metas(state.as_ref(), &req.region, None);
     tracing::info!(
         op_id,
         op = "update_musicmetas",
@@ -463,14 +468,17 @@ pub async fn update_musicmetas_from_string(
             op_id,
             "update_musicmetas_from_string",
             UserdataInvalidation::Region(&req.region),
-            |engine| engine.update_musicmetas_from_string(&req.data, &req.region),
+            |engine| {
+                engine.update_musicmetas_from_string(&req.data, &req.region)?;
+                record_pushed_music_metas(
+                    state.as_ref(),
+                    &req.region,
+                    Some(crate::registry::digest_hex(&req.data)),
+                );
+                Ok(())
+            },
         )
     })?;
-    record_pushed_music_metas(
-        state.as_ref(),
-        &req.region,
-        Some(crate::registry::digest_hex(&req.data)),
-    );
     tracing::info!(
         op_id,
         op = "update_musicmetas_from_string",

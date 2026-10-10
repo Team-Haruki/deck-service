@@ -484,18 +484,6 @@ pub async fn ensure_region(
         .transpose()?;
     let fetch_elapsed = started.elapsed();
 
-    let region_for_engine = region.clone();
-    let metas_for_engine = metas_text.clone();
-    tokio::task::block_in_place(|| {
-        apply_exclusive(state, &region_for_engine, |engine| {
-            engine.update_masterdata_from_json(&data, &region_for_engine)?;
-            if let Some(text) = metas_for_engine.as_deref() {
-                engine.update_musicmetas_from_string(text, &region_for_engine)?;
-            }
-            Ok(())
-        })
-    })?;
-
     let next = RegionMasterState {
         content_hash: manifest.content_hash.clone(),
         git_commit: manifest.git_commit.clone(),
@@ -506,10 +494,24 @@ pub async fn ensure_region(
         music_metas_etag: metas_etag,
         missing_optional_keys: audit.missing_optional_keys,
     };
-    state
-        .masterdata_state
-        .lock()
-        .insert(region.clone(), next.clone());
+    let region_for_engine = region.clone();
+    let metas_for_engine = metas_text.clone();
+    let next_for_state = next.clone();
+    tokio::task::block_in_place(|| {
+        apply_exclusive(state, &region_for_engine, |engine| {
+            engine.update_masterdata_from_json(&data, &region_for_engine)?;
+            if let Some(text) = metas_for_engine.as_deref() {
+                engine.update_musicmetas_from_string(text, &region_for_engine)?;
+            }
+            // Recorded under the exclusive pool lock: a music metas push takes
+            // the same lock, so the state always describes the engine.
+            state
+                .masterdata_state
+                .lock()
+                .insert(region_for_engine.clone(), next_for_state);
+            Ok(())
+        })
+    })?;
     tracing::info!(
         region = %region,
         reason,
@@ -541,28 +543,37 @@ async fn refresh_music_metas(
     let text = String::from_utf8(bytes)
         .map_err(|err| RegistryError::Decode(format!("music_metas not UTF-8: {err}")))?;
     let digest = digest_hex(&text);
-    if loaded.music_metas_digest.as_deref() == Some(digest.as_str()) {
-        let mut same = loaded.clone();
-        same.music_metas_etag = etag.or(same.music_metas_etag);
-        state
-            .masterdata_state
-            .lock()
-            .insert(region.to_owned(), same.clone());
-        return Ok(same);
+    // Compare with what is recorded now, not with `loaded`: a push may have
+    // replaced the metas while this fetch was in flight.
+    {
+        let mut regions = state.masterdata_state.lock();
+        if let Some(current) = regions.get_mut(region)
+            && current.music_metas_digest.as_deref() == Some(digest.as_str())
+        {
+            if etag.is_some() {
+                current.music_metas_etag = etag;
+            }
+            return Ok(current.clone());
+        }
     }
     let region_owned = region.to_owned();
-    tokio::task::block_in_place(|| {
+    let next = tokio::task::block_in_place(|| {
+        let mut next = None;
         apply_exclusive(state, &region_owned, |engine| {
-            engine.update_musicmetas_from_string(&text, &region_owned)
+            engine.update_musicmetas_from_string(&text, &region_owned)?;
+            let mut regions = state.masterdata_state.lock();
+            let mut updated = regions
+                .get(&region_owned)
+                .cloned()
+                .unwrap_or_else(|| loaded.clone());
+            updated.music_metas_digest = Some(digest);
+            updated.music_metas_etag = etag;
+            regions.insert(region_owned.clone(), updated.clone());
+            next = Some(updated);
+            Ok(())
         })
+        .map(|()| next.expect("apply_exclusive ran the update"))
     })?;
-    let mut next = loaded.clone();
-    next.music_metas_digest = Some(digest);
-    next.music_metas_etag = etag;
-    state
-        .masterdata_state
-        .lock()
-        .insert(region.to_owned(), next.clone());
     tracing::info!(region = %region, "Refreshed deck-service music metas from the registry");
     Ok(next)
 }

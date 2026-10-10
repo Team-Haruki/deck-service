@@ -128,7 +128,7 @@ Batch `/recommend` picks its execution strategy from `DECK_ENGINE_THREADS`:
 
 HTTP content coding is negotiated in `content_encoding.rs` (an Axum `from_fn` middleware outside `DefaultBodyLimit`): every response advertises `Accept-Encoding: zstd`; `Content-Encoding: zstd` request bodies are decoded with `ruzstd` under the same byte limit as identity bodies; JSON/text responses ≥ 1 KiB are zstd-encoded when the request accepts it. Keep it pure Rust (`ruzstd`), no C zstd dependency — the runtime image is `scratch`.
 
-`GET /state/masterdata` reports `musicMetas` (region → sha256 of the loaded music metas); string pushes record their digest (`record_pushed_music_metas`) so Cloud can skip re-pushing identical metas after its own restart.
+`GET /state/masterdata` reports `musicMetas` (region → sha256 of the loaded music metas); string pushes record their digest (`record_pushed_music_metas`) so Cloud can skip re-pushing identical metas after its own restart. On a registry region a push also re-points the conditional-request etag at the pushed body (`"<sha256>"`, the registry's ETag scheme; a file-path push clears it), so the next refresh reloads the registry's copy whenever it differs: a push never pins a registry region. Metas carry no version, so a push cannot be rejected as older; the registry wins on the next refresh.
 
 ## Build System
 

@@ -484,18 +484,6 @@ pub async fn ensure_region(
         .transpose()?;
     let fetch_elapsed = started.elapsed();
 
-    let region_for_engine = region.clone();
-    let metas_for_engine = metas_text.clone();
-    tokio::task::block_in_place(|| {
-        apply_exclusive(state, &region_for_engine, |engine| {
-            engine.update_masterdata_from_json(&data, &region_for_engine)?;
-            if let Some(text) = metas_for_engine.as_deref() {
-                engine.update_musicmetas_from_string(text, &region_for_engine)?;
-            }
-            Ok(())
-        })
-    })?;
-
     let next = RegionMasterState {
         content_hash: manifest.content_hash.clone(),
         git_commit: manifest.git_commit.clone(),
@@ -506,10 +494,24 @@ pub async fn ensure_region(
         music_metas_etag: metas_etag,
         missing_optional_keys: audit.missing_optional_keys,
     };
-    state
-        .masterdata_state
-        .lock()
-        .insert(region.clone(), next.clone());
+    let region_for_engine = region.clone();
+    let metas_for_engine = metas_text.clone();
+    let next_for_state = next.clone();
+    tokio::task::block_in_place(|| {
+        apply_exclusive(state, &region_for_engine, |engine| {
+            engine.update_masterdata_from_json(&data, &region_for_engine)?;
+            if let Some(text) = metas_for_engine.as_deref() {
+                engine.update_musicmetas_from_string(text, &region_for_engine)?;
+            }
+            // Recorded under the exclusive pool lock: a music metas push takes
+            // the same lock, so the state always describes the engine.
+            state
+                .masterdata_state
+                .lock()
+                .insert(region_for_engine.clone(), next_for_state);
+            Ok(())
+        })
+    })?;
     tracing::info!(
         region = %region,
         reason,
@@ -541,28 +543,37 @@ async fn refresh_music_metas(
     let text = String::from_utf8(bytes)
         .map_err(|err| RegistryError::Decode(format!("music_metas not UTF-8: {err}")))?;
     let digest = digest_hex(&text);
-    if loaded.music_metas_digest.as_deref() == Some(digest.as_str()) {
-        let mut same = loaded.clone();
-        same.music_metas_etag = etag.or(same.music_metas_etag);
-        state
-            .masterdata_state
-            .lock()
-            .insert(region.to_owned(), same.clone());
-        return Ok(same);
+    // Compare with what is recorded now, not with `loaded`: a push may have
+    // replaced the metas while this fetch was in flight.
+    {
+        let mut regions = state.masterdata_state.lock();
+        if let Some(current) = regions.get_mut(region)
+            && current.music_metas_digest.as_deref() == Some(digest.as_str())
+        {
+            if etag.is_some() {
+                current.music_metas_etag = etag;
+            }
+            return Ok(current.clone());
+        }
     }
     let region_owned = region.to_owned();
-    tokio::task::block_in_place(|| {
+    let next = tokio::task::block_in_place(|| {
+        let mut next = None;
         apply_exclusive(state, &region_owned, |engine| {
-            engine.update_musicmetas_from_string(&text, &region_owned)
+            engine.update_musicmetas_from_string(&text, &region_owned)?;
+            let mut regions = state.masterdata_state.lock();
+            let mut updated = regions
+                .get(&region_owned)
+                .cloned()
+                .unwrap_or_else(|| loaded.clone());
+            updated.music_metas_digest = Some(digest);
+            updated.music_metas_etag = etag;
+            regions.insert(region_owned.clone(), updated.clone());
+            next = Some(updated);
+            Ok(())
         })
+        .map(|()| next.expect("apply_exclusive ran the update"))
     })?;
-    let mut next = loaded.clone();
-    next.music_metas_digest = Some(digest);
-    next.music_metas_etag = etag;
-    state
-        .masterdata_state
-        .lock()
-        .insert(region.to_owned(), next.clone());
     tracing::info!(region = %region, "Refreshed deck-service music metas from the registry");
     Ok(next)
 }
@@ -646,6 +657,12 @@ pub fn spawn_refresh_loop(state: Arc<AppState>, cfg: RegistryConfig) {
             }
         }
     });
+}
+
+/// The registry's ETag for a body with this sha256 digest (a strong ETag of
+/// the hex digest).
+pub fn strong_etag(digest: &str) -> String {
+    format!("\"{digest}\"")
 }
 
 pub fn digest_hex(text: &str) -> String {
@@ -746,6 +763,7 @@ mod tests {
         manifest_requests: AtomicUsize,
         blob_requests: AtomicUsize,
         metas_requests: AtomicUsize,
+        metas_not_modified: AtomicUsize,
     }
 
     type Shared = Arc<Mutex<FakeRegistry>>;
@@ -853,6 +871,7 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             == Some(etag.as_str())
         {
+            fake.metas_not_modified.fetch_add(1, Ordering::Relaxed);
             return StatusCode::NOT_MODIFIED.into_response();
         }
         ([(header::ETAG, etag.clone())], body.clone()).into_response()
@@ -1191,6 +1210,86 @@ mod tests {
         .unwrap();
         let axum::Json(snapshot) = masterdata_state(State(plain)).await;
         assert!(!snapshot.music_metas.contains_key("jp"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pushed_music_metas_never_pin_a_registry_region() {
+        use crate::handlers::{masterdata_state, update_musicmetas, update_musicmetas_from_string};
+        use crate::models::{UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest};
+
+        let registry: Shared = Arc::default();
+        publish(&registry, "en", &all_keys(), "3.0.0");
+        publish_metas(&registry, "en", MUSIC_METAS_V1);
+        let url = serve_fake_registry(registry.clone()).await;
+        let state = app_state(Some(&url));
+        let not_modified = || registry.lock().metas_not_modified.load(Ordering::Relaxed);
+        let digest = |state: &Arc<AppState>| {
+            state.masterdata_state.lock()["en"]
+                .music_metas_digest
+                .clone()
+                .unwrap_or_default()
+        };
+        let push = |data: &'static str| {
+            update_musicmetas_from_string(
+                State(state.clone()),
+                axum::Json(UpdateMusicmetasFromStringRequest {
+                    data: data.into(),
+                    region: "en".into(),
+                }),
+            )
+        };
+
+        ensure_region(&state, "en", None, "preload").await.unwrap();
+        // The registry moves on and the node follows it.
+        publish_metas(&registry, "en", MUSIC_METAS_V2);
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A client still holding the previous copy pushes it (the 2026-10-11
+        // regression): the node reports what was pushed ...
+        let _ = push(MUSIC_METAS_V1).await.unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(state.clone())).await;
+        assert_eq!(snapshot.music_metas["en"], digest_hex(MUSIC_METAS_V1));
+
+        // ... but the next refresh is not answered 304: it reloads the
+        // registry's copy.
+        let before = not_modified();
+        let outcome = ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert!(!outcome.reloaded, "master data itself did not change");
+        assert_eq!(not_modified(), before);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A push of exactly what the registry serves keeps the cheap path:
+        // the following refresh is a 304 and nothing changes.
+        let _ = push(MUSIC_METAS_V2).await.unwrap();
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(not_modified(), before + 1);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A file-path push leaves the content unknown: the etag is dropped
+        // and the next refresh reloads the registry's copy.
+        let dir = std::env::temp_dir().join(format!("deck-metas-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("music_metas_en.json");
+        std::fs::write(&file, MUSIC_METAS_V1).unwrap();
+        let _ = update_musicmetas(
+            State(state.clone()),
+            axum::Json(UpdateMusicmetasRequest {
+                file_path: file.to_string_lossy().into_owned(),
+                region: "en".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.masterdata_state.lock()["en"]
+                .music_metas_etag
+                .is_none()
+        );
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(not_modified(), before + 1);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

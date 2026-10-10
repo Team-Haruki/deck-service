@@ -648,6 +648,12 @@ pub fn spawn_refresh_loop(state: Arc<AppState>, cfg: RegistryConfig) {
     });
 }
 
+/// The registry's ETag for a body with this sha256 digest (a strong ETag of
+/// the hex digest).
+pub fn strong_etag(digest: &str) -> String {
+    format!("\"{digest}\"")
+}
+
 pub fn digest_hex(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     let mut out = String::with_capacity(64);
@@ -746,6 +752,7 @@ mod tests {
         manifest_requests: AtomicUsize,
         blob_requests: AtomicUsize,
         metas_requests: AtomicUsize,
+        metas_not_modified: AtomicUsize,
     }
 
     type Shared = Arc<Mutex<FakeRegistry>>;
@@ -853,6 +860,7 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             == Some(etag.as_str())
         {
+            fake.metas_not_modified.fetch_add(1, Ordering::Relaxed);
             return StatusCode::NOT_MODIFIED.into_response();
         }
         ([(header::ETAG, etag.clone())], body.clone()).into_response()
@@ -1191,6 +1199,86 @@ mod tests {
         .unwrap();
         let axum::Json(snapshot) = masterdata_state(State(plain)).await;
         assert!(!snapshot.music_metas.contains_key("jp"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pushed_music_metas_never_pin_a_registry_region() {
+        use crate::handlers::{masterdata_state, update_musicmetas, update_musicmetas_from_string};
+        use crate::models::{UpdateMusicmetasFromStringRequest, UpdateMusicmetasRequest};
+
+        let registry: Shared = Arc::default();
+        publish(&registry, "en", &all_keys(), "3.0.0");
+        publish_metas(&registry, "en", MUSIC_METAS_V1);
+        let url = serve_fake_registry(registry.clone()).await;
+        let state = app_state(Some(&url));
+        let not_modified = || registry.lock().metas_not_modified.load(Ordering::Relaxed);
+        let digest = |state: &Arc<AppState>| {
+            state.masterdata_state.lock()["en"]
+                .music_metas_digest
+                .clone()
+                .unwrap_or_default()
+        };
+        let push = |data: &'static str| {
+            update_musicmetas_from_string(
+                State(state.clone()),
+                axum::Json(UpdateMusicmetasFromStringRequest {
+                    data: data.into(),
+                    region: "en".into(),
+                }),
+            )
+        };
+
+        ensure_region(&state, "en", None, "preload").await.unwrap();
+        // The registry moves on and the node follows it.
+        publish_metas(&registry, "en", MUSIC_METAS_V2);
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A client still holding the previous copy pushes it (the 2026-10-11
+        // regression): the node reports what was pushed ...
+        let _ = push(MUSIC_METAS_V1).await.unwrap();
+        let axum::Json(snapshot) = masterdata_state(State(state.clone())).await;
+        assert_eq!(snapshot.music_metas["en"], digest_hex(MUSIC_METAS_V1));
+
+        // ... but the next refresh is not answered 304: it reloads the
+        // registry's copy.
+        let before = not_modified();
+        let outcome = ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert!(!outcome.reloaded, "master data itself did not change");
+        assert_eq!(not_modified(), before);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A push of exactly what the registry serves keeps the cheap path:
+        // the following refresh is a 304 and nothing changes.
+        let _ = push(MUSIC_METAS_V2).await.unwrap();
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(not_modified(), before + 1);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
+
+        // A file-path push leaves the content unknown: the etag is dropped
+        // and the next refresh reloads the registry's copy.
+        let dir = std::env::temp_dir().join(format!("deck-metas-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("music_metas_en.json");
+        std::fs::write(&file, MUSIC_METAS_V1).unwrap();
+        let _ = update_musicmetas(
+            State(state.clone()),
+            axum::Json(UpdateMusicmetasRequest {
+                file_path: file.to_string_lossy().into_owned(),
+                region: "en".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.masterdata_state.lock()["en"]
+                .music_metas_etag
+                .is_none()
+        );
+        ensure_region(&state, "en", None, "refresh").await.unwrap();
+        assert_eq!(not_modified(), before + 1);
+        assert_eq!(digest(&state), digest_hex(MUSIC_METAS_V2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

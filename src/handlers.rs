@@ -369,16 +369,35 @@ pub async fn masterdata_state(State(state): State<Arc<AppState>>) -> Json<Master
     })
 }
 
-/// Record which music metas a region now holds after a push. A registry
-/// region keeps the digest in its state (the conditional-request etag is left
-/// alone, so the refresh loop still sees what it last fetched); any other
-/// region is tracked in `music_metas_pushed`. `None` (a file-path push)
-/// forgets the digest, since the loaded content is no longer known.
+/// Record which music metas a region now holds after a push.
+///
+/// A registry region keeps the digest in its state and its conditional-request
+/// etag is re-pointed at the pushed content: the registry's metas ETag is the
+/// strong ETag of the body's sha256 (`"<sha256>"`), so the next refresh answers
+/// 304 only when the registry still serves exactly what was pushed, and
+/// otherwise reloads the registry's copy. Keeping the old etag would make every
+/// later refresh a 304 and pin the pushed content for good. Metas carry no
+/// version or timestamp, so a push cannot be judged older or newer than what
+/// is loaded; the registry stays authoritative and wins on the next refresh
+/// (`DECK_REGISTRY_REFRESH_MS`).
+///
+/// Any other region is tracked in `music_metas_pushed`. `None` (a file-path
+/// push) forgets the digest, since the loaded content is no longer known, and
+/// clears the etag so a registry region refetches unconditionally.
 fn record_pushed_music_metas(state: &AppState, region: &str, digest: Option<String>) {
     let region = region.trim().to_ascii_lowercase();
     let mut pushed = state.music_metas_pushed.lock();
     let mut registry = state.masterdata_state.lock();
     if let Some(loaded) = registry.get_mut(&region) {
+        if loaded.music_metas_digest != digest {
+            tracing::warn!(
+                region = %region,
+                previous_digest = loaded.music_metas_digest.as_deref().unwrap_or(""),
+                pushed_digest = digest.as_deref().unwrap_or(""),
+                "Pushed music metas replace the registry-loaded copy; the next registry refresh revalidates"
+            );
+        }
+        loaded.music_metas_etag = digest.as_deref().map(crate::registry::strong_etag);
         loaded.music_metas_digest = digest;
         pushed.remove(&region);
         return;

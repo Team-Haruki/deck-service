@@ -203,6 +203,7 @@ Content-Type: application/json
 | `user_data_file_path` | `string` | Path to user data file |
 | `user_data_str` | `string` | User data as inline JSON string |
 | `event_id` | `int` | Event ID |
+| `event_me_unit` | `string` | Memory-event simulation: `light_sound`, `idol`, `street`, `theme_park`, `school_refusal`, or `piapro`. All attributes +25%; native unit characters +75% total, plus mastery. Human units exclude virtual singers. Marathon only; cannot combine with other event/custom bonus selectors. |
 | `event_attr` | `string` | Event attribute |
 | `event_unit` | `string` | Event unit |
 | `event_type` | `string` | Event type |

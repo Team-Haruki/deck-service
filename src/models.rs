@@ -128,6 +128,8 @@ pub struct DeckRecommendOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_me_unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub event_attr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_unit: Option<String>,

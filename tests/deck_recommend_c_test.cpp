@@ -793,7 +793,30 @@ void test_limited_auto_policy() {
     assert(AutoScorePolicy{}.active_coefficient(true, 1500) == 0.7);
 }
 
+void test_memory_event_selection() {
+    DataProvider provider{};
+    provider.masterData = std::make_shared<MasterData>();
+    for (const auto* unit : {"light_sound", "idol", "street", "theme_park", "school_refusal", "piapro"}) {
+        const auto options = parse(std::string("{\"event_me_unit\":\"") + unit + "\"}");
+        const int event_id = SekaiDeckRecommendC::resolve_event_id(options.root(), provider, false);
+        assert(event_id == provider.masterData->getMemoryEventFakeEventId(mapEnum(EnumMap::unit, unit)));
+        expect_error([&] { SekaiDeckRecommendC::resolve_event_id(options.root(), provider, true); }, "event_me_unit requires");
+    }
+    for (const auto* extra : {
+        "\"event_id\":220", "\"event_attr\":\"cute\"", "\"event_unit\":\"idol\"",
+        "\"world_bloom_event_turn\":1", "\"world_bloom_finale_turn\":3", "\"world_bloom_character_id\":9",
+        "\"event_type\":\"world_bloom\"", "\"custom_bonus_attr\":\"cute\"",
+        "\"custom_bonus_character_ids\":[9]", "\"live_type\":\"mysekai\""
+    }) {
+        const auto options = parse(std::string("{\"event_me_unit\":\"street\",") + extra + "}");
+        expect_error([&] { SekaiDeckRecommendC::resolve_event_id(options.root(), provider, false); }, "event_me_unit requires");
+    }
+    const auto invalid = parse(R"({"event_me_unit":"invalid"})");
+    expect_error([&] { SekaiDeckRecommendC::resolve_event_id(invalid.root(), provider, false); }, "Invalid memory event unit");
+}
+
 int main() {
+    test_memory_event_selection();
     test_limited_auto_policy();
     test_json_helpers();
     test_result_serializers();

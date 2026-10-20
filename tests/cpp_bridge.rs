@@ -6,7 +6,7 @@ use std::os::raw::c_char;
 
 use deck_service::bridge::DeckRecommend;
 use deck_service::ffi;
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueTrait, Value, json};
 
 const MASTERDATA_KEYS: &[&str] = &[
     "areaItemLevels",
@@ -642,4 +642,16 @@ fn legacy_c_entry_points_return_owned_errors() {
         ffi::deck_recommend_destroy(handle);
         ffi::deck_recommend_destroy(std::ptr::null_mut());
     }
+}
+
+#[test]
+fn memory_event_option_survives_http_model_serialization() {
+    let options: deck_service::models::DeckRecommendOptions = sonic_rs::from_str(
+        r#"{"region":"jp","live_type":"multi","music_id":1,"music_diff":"expert","event_me_unit":"street"}"#,
+    ).unwrap();
+    assert_eq!(options.event_me_unit.as_deref(), Some("street"));
+    let encoded = sonic_rs::to_string(&options).unwrap();
+    let decoded: Value = sonic_rs::from_str(&encoded).unwrap();
+    assert_eq!(decoded["event_me_unit"], json!("street"));
+    assert!(decoded["event_id"].is_null());
 }

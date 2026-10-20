@@ -1056,6 +1056,20 @@ public:
         bool is_challenge
     ) {
         auto event_id = json_opt<int>(opts, "event_id");
+        if (auto unit = json_opt<std::string>(opts, "event_me_unit"); unit.has_value()) {
+            if (is_challenge || json_opt<std::string>(opts, "live_type") == "mysekai"
+                || event_id.has_value() || opts.contains("event_attr") || opts.contains("event_unit")
+                || opts.contains("world_bloom_event_turn") || opts.contains("world_bloom_finale_turn")
+                || opts.contains("world_bloom_character_id") || opts.contains("custom_bonus_attr")
+                || opts.contains("custom_bonus_character_ids")
+                || json_opt<std::string>(opts, "event_type").value_or("marathon") != "marathon") {
+                throw std::invalid_argument("event_me_unit requires a marathon simulation without other event or custom bonus selectors.");
+            }
+            if (!VALID_UNIT_TYPES.count(*unit)) {
+                throw std::invalid_argument("Invalid memory event unit: " + *unit);
+            }
+            return dp.masterData->getMemoryEventFakeEventId(mapEnum(EnumMap::unit, *unit));
+        }
         if (!event_id.has_value()) {
             return is_challenge ? 0 : resolve_fake_event_id(opts, dp);
         }

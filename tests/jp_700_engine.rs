@@ -139,6 +139,10 @@ fn synthetic_masterdata() -> HashMap<String, String> {
         .collect();
     set("cards", json!(cards));
     set(
+        "eventRarityBonusRates",
+        json!([{"cardRarityType":"rarity_4","masterRank":0,"bonusRate":0}]),
+    );
+    set(
         "cardRarities",
         json!([{"cardRarityType": "rarity_4", "maxLevel": 1, "trainingMaxLevel": 1, "maxSkillLevel": 1}]),
     );
@@ -167,6 +171,9 @@ fn synthetic_masterdata() -> HashMap<String, String> {
             characters
                 .iter()
                 .map(|&c| json!({"id": c, "gameCharacterId": c, "unit": character_unit(c)}))
+                .chain(std::iter::once(
+                    json!({"id":122,"gameCharacterId":22,"unit":"idol"})
+                ))
                 .collect::<Vec<_>>()
         ),
     );
@@ -658,4 +665,44 @@ fn jp_master_calculations_accept_gate_6_and_multi_unit_evaluation() {
         i64_field(&result.get("decks").unwrap()[0], "area_item_bonus_power")
     };
     assert!(by_deck_power > forced_off_power);
+}
+
+#[test]
+fn mysekai_memory_events_keep_unit_bonus_and_score_formula() {
+    let _serial = serial();
+    let engine = synthetic_engine();
+    let userdata = synthetic_userdata(0, &[], &GATE_DECK);
+    for unit in UNITS.into_iter().chain(["piapro"]) {
+        let options = json!({
+            "region": "jp", "user_data_str": userdata, "live_type": "mysekai",
+            "music_id": 1, "music_diff": "expert", "algorithm": "dfs", "limit": 1,
+            "event_me_unit": unit, "fixed_cards": GATE_DECK
+        });
+        let result: Value =
+            sonic_rs::from_str(&engine.recommend_raw(&to_json(&options)).unwrap()).unwrap();
+        let deck = &result["decks"][0];
+        let mut expected_bonus = 0.0;
+        for card in deck["cards"].as_array().unwrap() {
+            let id = i64_field(card, "card_id") as i32;
+            let (_, character, _) = CARDS.iter().find(|c| c.0 == id).unwrap();
+            let bonus = if character_unit(*character) == unit {
+                75.0
+            } else {
+                25.0
+            };
+            assert_eq!(
+                card["event_bonus_rate"].as_f64().unwrap(),
+                bonus,
+                "unit={unit} card={id}"
+            );
+            expected_bonus += bonus;
+        }
+        assert_eq!(deck["event_bonus_rate"].as_f64().unwrap(), expected_bonus);
+        let power_bonus =
+            ((1.0 + i64_field(deck, "total_power") as f64 / 450000.0) * 10.0 + 1e-6).floor() / 10.0;
+        let expected_points =
+            (power_bonus * (1.0 + expected_bonus / 100.0) + 1e-6).floor() as i64 * 500;
+        assert_eq!(i64_field(deck, "mysekai_event_point"), expected_points);
+        assert!(expected_points > 0);
+    }
 }

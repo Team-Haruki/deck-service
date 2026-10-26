@@ -12,7 +12,7 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ruzstd = "0.9"
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Registry client: plain http on the tailnet, so no TLS backend (the runtime
 # image is FROM scratch and carries no CA bundle).
 reqwest = { version = "0.13", default-features = false }

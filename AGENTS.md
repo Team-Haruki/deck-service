@@ -48,7 +48,7 @@ DECK_DATA_DIR=./_cpp_src/data cargo run --release
 
 - `DECK_DATA_DIR` — C++ engine static data directory (read-only). Optional: unset falls back to `_cpp_src/data` relative to the executable (see Build & Run); the Docker image sets `/data`
 - `DECK_RL_SEED_CACHE_FILE` / `DECK_RL_SEED_CACHE_DISABLE` — engine RL seed cache file (unset → `$DECK_DATA_DIR/rl_seed_cache.tsv`; the image sets `/cache/rl_seed_cache.tsv`) and the literal `1` kill switch; `main.rs` probes writability at startup and logs enabled / disabled / not-writable
-- `DECK_REGISTRY_URL` — master registry base URL (plain `http`: `reqwest` is built without a TLS backend). When set, `DECK_REGISTRY_REGIONS` (default `jp,en,cn,tw,kr`) are pulled from the registry (`registry.rs`: manifest → the 38 engine keys by blob digest → `update_masterdata_from_json`, plus music metas) and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` (300000, `0` disables), `DECK_REGISTRY_FETCH_CONCURRENCY` (8, clamped 1–64) and `DECK_REGISTRY_TIMEOUT_MS` (30000, at least 1000) tune it; `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
+- `DECK_REGISTRY_URL` — master registry base URL (plain `http`: `reqwest` is built without a TLS backend). When set, `DECK_REGISTRY_REGIONS` (default `jp,en,cn,tw,kr`) are pulled from the registry (`registry.rs`: manifest → the 39 engine keys by blob digest → `update_masterdata_from_json`, plus music metas) and the directory variables below only cover the remaining regions. `DECK_REGISTRY_REFRESH_MS` (300000, `0` disables), `DECK_REGISTRY_FETCH_CONCURRENCY` (8, clamped 1–64) and `DECK_REGISTRY_TIMEOUT_MS` (30000, at least 1000) tune it; `POST /update/masterdata/registry` and `GET /state/masterdata` expose it
 - `DECK_MASTERDATA_DIR` / `DECK_MASTERDATA_BASE_DIR` — legacy (deprecated) masterdata directory preloaded on startup; `POST /update/masterdata` (`base_dir`) is deprecated in favour of `POST /update/masterdata/registry`
 - `DECK_MASTERDATA_REGIONS` — legacy: CSV of regions to preload from the directory (default `jp,en,cn,tw,kr`)
 - `DECK_MASTERDATA_REFRESH_MS` — legacy: directory refresh watcher interval (default 300000, `0` disables)
@@ -88,8 +88,8 @@ All Rust source files are directly in `src/` — no nested modules:
 | `userdata_cache.rs` | `UserdataCache`: LRU userdata payload cache with byte budget, idle TTL and region tags; `CacheStats` for `GET /cache/stats` |
 | `content_encoding.rs` | zstd HTTP content-coding middleware and the shared `MAX_BODY_BYTES` limit |
 | `masterdata.rs` | Legacy masterdata directory resolution with region-aware candidate search (the directory path and `POST /update/masterdata` are deprecated) |
-| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the lock tests for the 25 required + 13 optional engine keys |
-| `registry.rs` | Master registry client: frozen engine key list (25 required + 13 optional = 38), manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
+| `masterdata_audit.rs` | Master data key checks shared by the registry and JSON push paths: key normalisation, non-empty key tables, missing required/optional keys, and the lock tests for the 25 required + 14 optional engine keys |
+| `registry.rs` | Master registry client: frozen engine key list (25 required + 14 optional = 39), manifest/blob/music-metas fetch, `ensure_region` (short-circuit on known `contentHash`, reload on change), preload + refresh loop, per-region `RegionMasterState` |
 | `error.rs` | `AppError` enum with `IntoResponse` impl |
 
 ## Key Conventions

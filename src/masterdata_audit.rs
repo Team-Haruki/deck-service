@@ -147,7 +147,8 @@ mod tests {
         "worldBlooms",
         "worldBloomSupportDeckBonuses",
     ];
-    const FROZEN_OPTIONAL: [&str; 13] = [
+    const FROZEN_OPTIONAL: [&str; 14] = [
+        "configs",
         "worldBloomSupportDeckUnitEventLimitedBonuses",
         "cardMysekaiCanvasBonuses",
         "eventCardBonusLimits",
@@ -245,7 +246,7 @@ mod tests {
             .chain(FROZEN_OPTIONAL.iter())
             .copied()
             .collect();
-        assert_eq!(all.len(), 38);
+        assert_eq!(all.len(), 39);
         let required: HashSet<&str> = FROZEN_REQUIRED.iter().copied().collect();
         let optional: HashSet<&str> = FROZEN_OPTIONAL.iter().copied().collect();
         assert!(required.is_disjoint(&optional));

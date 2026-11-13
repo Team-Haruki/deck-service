@@ -48,7 +48,8 @@ pub const REQUIRED_MASTERDATA_KEYS: [&str; 25] = [
     "worldBloomSupportDeckBonuses",
 ];
 
-pub const OPTIONAL_MASTERDATA_KEYS: [&str; 13] = [
+pub const OPTIONAL_MASTERDATA_KEYS: [&str; 14] = [
+    "configs",
     "worldBloomSupportDeckUnitEventLimitedBonuses",
     "cardMysekaiCanvasBonuses",
     "eventCardBonusLimits",
@@ -710,11 +711,11 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(REQUIRED_MASTERDATA_KEYS.len(), 25);
-        assert_eq!(OPTIONAL_MASTERDATA_KEYS.len(), 13);
-        assert_eq!(all.len(), 38);
+        assert_eq!(OPTIONAL_MASTERDATA_KEYS.len(), 14);
+        assert_eq!(all.len(), 39);
         assert_eq!(
             all.iter().collect::<HashSet<_>>().len(),
-            38,
+            39,
             "duplicate key"
         );
         for key in ["cards", "musics", "events", "worldBloomSupportDeckBonuses"] {
@@ -942,7 +943,7 @@ mod tests {
         let url = serve_fake_registry(registry.clone()).await;
         let state = app_state(Some(&url));
 
-        // Full load: manifest + 38 blobs + metas.
+        // Full load: manifest + 39 blobs + metas.
         let outcome = ensure_region(&state, "JP", None, "preload").await.unwrap();
         assert!(outcome.reloaded);
         assert_eq!(outcome.state.content_hash, hash_v1);
@@ -957,7 +958,7 @@ mod tests {
         assert!(outcome.state.missing_optional_keys.is_empty());
         let text = sonic_rs::to_string(&outcome.state).unwrap();
         assert!(!text.contains("missingOptionalKeys"), "{text}");
-        assert_eq!(counts(&registry), (1, 38, 1));
+        assert_eq!(counts(&registry), (1, 39, 1));
         assert!(state.masterdata_state.lock().contains_key("jp"));
 
         // Known hash: no round trip at all.
@@ -965,14 +966,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome.reloaded);
-        assert_eq!(counts(&registry), (1, 38, 1));
+        assert_eq!(counts(&registry), (1, 39, 1));
 
         // Unknown/absent hash: one manifest fetch, unchanged, metas 304.
         let outcome = ensure_region(&state, "jp", Some("stale"), "request")
             .await
             .unwrap();
         assert!(!outcome.reloaded);
-        assert_eq!(counts(&registry), (2, 38, 2));
+        assert_eq!(counts(&registry), (2, 39, 2));
 
         // Music metas moved while master data did not.
         publish_metas(&registry, "jp", MUSIC_METAS_V2);
@@ -982,7 +983,7 @@ mod tests {
             outcome.state.music_metas_digest.as_deref(),
             Some(digest_hex(MUSIC_METAS_V2).as_str())
         );
-        assert_eq!(counts(&registry), (3, 38, 3));
+        assert_eq!(counts(&registry), (3, 39, 3));
 
         // E7: seed userdata tagged cn, tagged jp, and never used.
         state.userdata_cache.remember("h-cn", "{}").unwrap();
@@ -996,14 +997,14 @@ mod tests {
             lease.remember_userdata_hash("h-jp");
         }
 
-        // New manifest without an optional key: reload, 36 blobs.
+        // New manifest without an optional key: reload, 38 blobs.
         let mut keys = all_keys();
         keys.retain(|key| *key != "ingameNotes");
         let hash_v2 = publish(&registry, "jp", &keys, "1.0.1");
         let outcome = ensure_region(&state, "jp", None, "refresh").await.unwrap();
         assert!(outcome.reloaded);
         assert_eq!(outcome.state.content_hash, hash_v2);
-        assert_eq!(counts(&registry), (4, 38 + 37, 4));
+        assert_eq!(counts(&registry), (4, 39 + 38, 4));
         assert_eq!(outcome.state.missing_optional_keys, ["ingameNotes"]);
 
         // E7: the jp reload evicts jp-tagged and untagged userdata, keeps cn,
@@ -1079,7 +1080,7 @@ mod tests {
             hash_v2,
             "rejected load must keep the previous state"
         );
-        assert_eq!(counts(&registry).1, before.1 + 38, "check runs after fetch");
+        assert_eq!(counts(&registry).1, before.1 + 39, "check runs after fetch");
         assert!(matches!(AppError::from(err), AppError::Upstream(_)));
 
         // Regions the registry does not have surface as upstream errors.
